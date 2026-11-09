@@ -81,3 +81,7 @@ THEORY行では元のブレイクOHLC等を重複保存しません。export_sig
 ## v1.02の入力記録
 
 列数・ファイル名・recorder_version=1.00は維持します。configuration列にSignalPeriod、ArrowPeriod、SL_pips、AlertON、Emailを明記し、inputs=EXPLICIT_FIVE_USER_SUPPLIED_ORDERとinput_types=int:int:int:bool:boolを記録します。旧DEFAULTS行を上書きしません。現在の入力が旧状態と異なる場合、既存のCONFIGイベントでドット群をリセットします。
+
+## v1.03の別診断CSV
+
+既存の本仕様の列は維持します。新しい41列BSMDiagnosticsと30列BSMObjectsは [V103_CSV.md](V103_CSV.md) を参照してください。

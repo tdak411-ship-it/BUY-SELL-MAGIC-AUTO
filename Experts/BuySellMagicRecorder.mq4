@@ -1,5 +1,5 @@
 #property strict
-#property version "1.02"
+#property version "1.03"
 #property description "Independent Buy Sell Magic buffer probe and closed-M1 breakout evidence recorder. No orders."
 #include <BuySellMagicCore.mqh>
 input string IndicatorName="buy-sell-magic1";
@@ -15,6 +15,9 @@ input int BlueDotMode=-1;
 input int ProbeMaxMode=7; // MQL4 documented mode range is 0..7; higher modes logged unsupported
 input int MinimumHorizontalDots=5;
 input double DotPriceRatioLimit=10.0;
+input bool CollectChartObjects=true;
+input int ObjectSnapshotLimit=0; // 0 = all objects; nonzero is explicitly reported if truncated
+input datetime DiagnosticBarTime2=0; // optional second raw-only diagnostic sample
 input datetime DiagnosticBarTime=0; // optional exact closed M1 bar, raw probe only
 const int COLS=50;
 string VERSION="1.00";
@@ -37,6 +40,148 @@ bool Flush(int h){ResetLastError();FileFlush(h);return GetLastError()==0;}
 bool ReadCells(int h,string &f[],int n){
  ArrayResize(f,n);for(int i=0;i<n;i++){if(FileIsEnding(h))return false;f[i]=FileReadString(h);if(i<n-1 && FileIsLineEnding(h))return false;}
  return FileIsLineEnding(h);
+}
+// Additional append-only diagnostics; never supplies values to the dot classifier.
+const int DIAG_COLS=41,OBJECT_COLS=30;
+int diagnosticsFile=INVALID_HANDLE,objectsFile=INVALID_HANDLE,diagnosticsSequence=0,objectsSequence=0;
+int probeBatch=0,objectBatch=0;
+long diagnosticsChart=0;
+string diagnosticsName,objectsName,diagnosticsSession,activeProbeSample="",dllAllowed="UNAVAILABLE";
+int dllFlagError=0;
+bool firstIcustomSnapshotDone=false;
+struct SeriesContext {
+ datetime requested,actual,anchor;
+ int shift,bars,lookupError,timeError,barsError,priceError,anchorError;
+ double reference;
+ string mapping;
+};
+string DiagnosticsHeader(){return "schema_version|sequence|session_id|event|sample_id|server_time|chart_id|symbol|timeframe|indicator_name|SignalPeriod|ArrowPeriod|SL_pips|AlertON|Email|requested_bar_time|resolved_bar_shift|reference_shift|actual_bar_time|buffer_mode|icustom_called|raw_value|value_classification|GetLastError|bars_available|indicator_read_status|indicator_init_status|lookup_error|bar_time_error|bars_error|reference_price_error|price_reference|anchor_bar_time|anchor_error|mapping_status|ea_dll_allowed|dll_flag_error|object_diagnostics_enabled|build|source|end";}
+string ObjectsHeader(){return "schema_version|sequence|session_id|snapshot_id|phase|server_time|chart_id|symbol|timeframe|object_index|objects_total|object_name|object_type|object_time1|object_price1|object_time2|object_price2|object_color|object_style|object_width|object_description|read_status|property_errors|time1_raw|price1_raw|time2_raw|price2_raw|text_encoding|source|end";}
+bool WriteAuditCells(int handle,string &f[],int columns){
+ ResetLastError();uint bytes=0;
+ if(columns==DIAG_COLS)bytes=FileWrite(handle,f[0],f[1],f[2],f[3],f[4],f[5],f[6],f[7],f[8],f[9],f[10],f[11],f[12],f[13],f[14],f[15],f[16],f[17],f[18],f[19],f[20],f[21],f[22],f[23],f[24],f[25],f[26],f[27],f[28],f[29],f[30],f[31],f[32],f[33],f[34],f[35],f[36],f[37],f[38],f[39],f[40]);
+ else if(columns==OBJECT_COLS)bytes=FileWrite(handle,f[0],f[1],f[2],f[3],f[4],f[5],f[6],f[7],f[8],f[9],f[10],f[11],f[12],f[13],f[14],f[15],f[16],f[17],f[18],f[19],f[20],f[21],f[22],f[23],f[24],f[25],f[26],f[27],f[28],f[29]);
+ int error=GetLastError();ResetLastError();FileFlush(handle);int flushError=GetLastError();
+ if(bytes==0 || error!=0 || flushError!=0){Print("BSM_DIAGNOSTICS_IO_FAILED; file=",handle==objectsFile?objectsName:diagnosticsName,"; write_error=",error,"; flush_error=",flushError);Stop("DIAGNOSTICS_WRITE_OR_FLUSH_FAILED_PRESERVE_FILE");return false;}return true;
+}
+bool OpenAuditFile(int &handle,string name,string header,int columns,int &count){
+ count=0;handle=FileOpen(name,FILE_READ|FILE_WRITE|FILE_CSV|FILE_ANSI|FILE_SHARE_READ,',',CP_UTF8);
+ if(handle==INVALID_HANDLE)return false;
+ string h[];string f[];if(StringSplit(header,'|',h)!=columns)return false;
+ if(FileSize(handle)==0){if(!WriteAuditCells(handle,h,columns))return false;}
+ else{
+  if(!ReadCells(handle,f,columns))return false;for(int i=0;i<columns;i++)if(f[i]!=h[i])return false;
+  while(!FileIsEnding(handle)){
+   if(!ReadCells(handle,f,columns) || f[0]!="1" || f[1]!=Num(count+1) || f[columns-1]!="COMMIT")return false;
+   count++;
+  }
+ }
+ return FileSeek(handle,0,SEEK_END);
+}
+void RefreshDllContext(){ResetLastError();bool allowed=IsDllsAllowed();dllFlagError=GetLastError();dllAllowed=dllFlagError==0 ? Flag(allowed) : "UNAVAILABLE";}
+bool OpenDiagnostics(){
+ diagnosticsName="BSMDiagnostics_"+Symbol()+"_M1_v1.csv";objectsName="BSMObjects_"+Symbol()+"_M1_v1.csv";
+ if(!OpenAuditFile(diagnosticsFile,diagnosticsName,DiagnosticsHeader(),DIAG_COLS,diagnosticsSequence) ||
+    !OpenAuditFile(objectsFile,objectsName,ObjectsHeader(),OBJECT_COLS,objectsSequence))return false;
+ diagnosticsChart=ChartID();activeProbeSample="";probeBatch=0;objectBatch=0;firstIcustomSnapshotDone=false;RefreshDllContext();
+ diagnosticsSession=Num((long)TimeCurrent())+"-"+Num(diagnosticsChart)+"-"+Num((long)GetTickCount())+"-"+Num(diagnosticsSequence+1);
+ return true;
+}
+void InspectSeries(datetime requested,SeriesContext &c){
+ c.requested=requested;c.actual=0;c.shift=-1;c.reference=0;
+ ResetLastError();c.bars=iBars(Symbol(),PERIOD_M1);c.barsError=GetLastError();
+ ResetLastError();c.shift=iBarShift(Symbol(),PERIOD_M1,requested,true);c.lookupError=GetLastError();
+ ResetLastError();c.actual=c.shift>=0 ? iTime(Symbol(),PERIOD_M1,c.shift) : 0;c.timeError=GetLastError();
+ ResetLastError();c.reference=c.shift>=1 ? iClose(Symbol(),PERIOD_M1,c.shift) : 0;c.priceError=GetLastError();
+ ResetLastError();c.anchor=iTime(Symbol(),PERIOD_M1,0);c.anchorError=GetLastError();
+ c.mapping="EXACT_CLOSED_BAR";
+ if(c.lookupError!=0)c.mapping="LOOKUP_ERROR";
+ else if(c.shift<0)c.mapping="BAR_NOT_FOUND";
+ else if(c.shift==0)c.mapping="UNCONFIRMED_BAR";
+ else if(c.timeError!=0)c.mapping="BAR_TIME_READ_ERROR";
+ else if(c.actual!=requested)c.mapping="BAR_TIME_MISMATCH";
+ else if(c.barsError!=0 || c.bars<=c.shift)c.mapping="HISTORY_UNAVAILABLE";
+ else if(c.priceError!=0 || !Positive(c.reference))c.mapping="PRICE_REFERENCE_UNAVAILABLE";
+ else if(c.anchorError!=0 || c.anchor<=0)c.mapping="ANCHOR_UNAVAILABLE";
+}
+string ReadStatus(string classification,int error,bool called){
+ if(!called && classification=="DLL_CONTEXT_BLOCKED")return "DLL_CONTEXT_NOT_FALSE_NOT_CALLED";
+ if(!called)return classification=="UNSUPPORTED_MT4_MODE" ? "UNSUPPORTED_MODE_NOT_CALLED" : "BAR_MAPPING_REJECTED_NOT_CALLED";
+ if(error!=0)return "ICUSTOM_API_ERROR_INIT_UNVERIFIED";
+ if(classification=="PRICE")return "PRICE_RETURNED_CHART_MATCH_UNVERIFIED";
+ if(classification=="EMPTY_VALUE" || classification=="ABSENT_MINUS_ONE")return "NO_PRICE_RETURNED_INIT_UNVERIFIED";
+ return "INVALID_OR_UNSTABLE_VALUE_INIT_UNVERIFIED";
+}
+bool WriteBufferDiagnostic(SeriesContext &c,string event,string sample,int expectedShift,int mode,string raw,string classification,int error,bool called){
+ string f[];ArrayResize(f,DIAG_COLS);
+ f[0]="1";f[1]=Num(diagnosticsSequence+1);f[2]=diagnosticsSession;f[3]=event;f[4]=sample;f[5]=Num((long)TimeCurrent());f[6]=Num(diagnosticsChart);f[7]=Symbol();f[8]="M1";f[9]=IndicatorName;
+ f[10]=Num(SignalPeriod);f[11]=Num(ArrowPeriod);f[12]=Num(SL_pips);f[13]=Flag(AlertON);f[14]=Flag(Email);
+ f[15]=Num((long)c.requested);f[16]=Num(c.shift);f[17]=Num(expectedShift);f[18]=Num((long)c.actual);f[19]=Num(mode);f[20]=Flag(called);f[21]=raw;f[22]=classification;f[23]=called?Num(error):"NOT_CALLED";f[24]=Num(c.bars);
+ f[25]=event=="SESSION" ? "EA_CONTEXT_ONLY_NOT_INDICATOR_STATE" : ReadStatus(classification,error,called);
+ f[26]="UNVERIFIED_REVIEW_EXPERTS_LOG";f[27]=Num(c.lookupError);f[28]=Num(c.timeError);f[29]=Num(c.barsError);f[30]=Num(c.priceError);f[31]=Positive(c.reference)?RawValue(c.reference):"NA";f[32]=Num((long)c.anchor);f[33]=Num(c.anchorError);f[34]=c.mapping;
+ f[35]=dllAllowed;f[36]=Num(dllFlagError);f[37]=Flag(CollectChartObjects);f[38]="1.03";f[39]="EXPLICIT5_ICUSTOM_DIAGNOSTIC_NO_INIT_SUCCESS_CLAIM";f[40]="COMMIT";
+ if(!WriteAuditCells(diagnosticsFile,f,DIAG_COLS))return false;diagnosticsSequence++;return true;
+}
+string EscapeObjectText(string value){
+ StringReplace(value,"%","%25");StringReplace(value,",","%2C");StringReplace(value,"\"","%22");StringReplace(value,"\r","%0D");StringReplace(value,"\n","%0A");
+ StringReplace(value,"=","%3D");StringReplace(value,"+","%2B");StringReplace(value,"-","%2D");StringReplace(value,"@","%40");return value;
+}
+bool ScreenObject(long type){return type==OBJ_LABEL || type==OBJ_BUTTON || type==OBJ_BITMAP_LABEL || type==OBJ_EDIT || type==OBJ_RECTANGLE_LABEL;}
+bool SingleAnchorObject(long type){return type==OBJ_VLINE || type==OBJ_HLINE || type==OBJ_TEXT || type==OBJ_ARROW;}
+void ObjectRowBase(string &f[],string snapshot,string phase,int index,int total){
+ ArrayResize(f,OBJECT_COLS);for(int i=0;i<OBJECT_COLS;i++)f[i]="NA";
+ f[0]="1";f[1]=Num(objectsSequence+1);f[2]=diagnosticsSession;f[3]=snapshot;f[4]=phase;f[5]=Num((long)TimeCurrent());f[6]=Num(diagnosticsChart);f[7]=Symbol();f[8]="M1";f[9]=Num(index);f[10]=Num(total);
+ f[27]="PERCENT_DELIMITERS_V1";f[28]="CURRENT_CHART_OBJECTS_NO_SIGNAL_INFERENCE";f[29]="COMMIT";
+}
+bool WriteObjectRow(string &f[]){if(!WriteAuditCells(objectsFile,f,OBJECT_COLS))return false;objectsSequence++;return true;}
+void Coordinate(string name,bool timeCoordinate,int anchor,bool applicable,string &value,string &raw,string &errors,string &status){
+ string label=(timeCoordinate ? "time" : "price")+Num(anchor+1);
+ if(!applicable){value="NA";raw="NOT_READ";status+=";"+label+"=NOT_APPLICABLE";return;}
+ int error=0;
+ if(timeCoordinate){ResetLastError();long v=ObjectGetInteger(diagnosticsChart,name,OBJPROP_TIME,anchor);error=GetLastError();raw=Num(v);if(error==0 && v>0)value=raw;else status+=";"+label+(error!=0?"=READ_ERROR":(v<0?"=INVALID_VALUE":"=UNAVAILABLE_OR_UNSUPPORTED"));}
+ else{ResetLastError();double v=ObjectGetDouble(diagnosticsChart,name,OBJPROP_PRICE,anchor);error=GetLastError();raw=RawValue(v);if(error==0 && Positive(v))value=raw;else status+=";"+label+(error!=0?"=READ_ERROR":(!MathIsValidNumber(v) || v<0 || v==EMPTY_VALUE ? "=INVALID_VALUE" : "=UNAVAILABLE_OR_UNSUPPORTED"));}
+ errors+=";"+label+"="+Num(error);
+}
+bool SnapshotObjects(string phase){
+ if(!CollectChartObjects)return true;
+ objectBatch++;string snapshot=(activeProbeSample=="" ? diagnosticsSession : activeProbeSample)+"|O|"+Num(objectBatch)+"|"+Num(objectsSequence+1);
+ ResetLastError();int total=ObjectsTotal(diagnosticsChart,-1,-1);int totalError=GetLastError();
+ int limit=total;if(ObjectSnapshotLimit>0 && limit>ObjectSnapshotLimit)limit=ObjectSnapshotLimit;
+ int enumerated=0;
+ if(totalError==0 && total>=0)for(int index=0;index<limit;index++){
+  string f[];ObjectRowBase(f,snapshot,phase,index,total);
+  ResetLastError();string name=ObjectName(diagnosticsChart,index,-1,-1);int nameError=GetLastError();
+  if(nameError!=0 || name==""){f[21]="OBJECT_NAME_UNAVAILABLE";f[22]="name="+Num(nameError);if(!WriteObjectRow(f))return false;continue;}
+  f[11]=EscapeObjectText(name);ResetLastError();long type=ObjectGetInteger(diagnosticsChart,name,OBJPROP_TYPE,0);int typeError=GetLastError();
+  string status="READ_ONLY_SOURCE_UNVERIFIED",errors="name=0;type="+Num(typeError);
+  if(typeError==0 && type>=0 && type<=1000){
+   f[12]=Num(type);bool screen=ScreenObject(type),second=!screen && !SingleAnchorObject(type);
+   Coordinate(name,true,0,!screen && type!=OBJ_HLINE,f[13],f[23],errors,status);
+   Coordinate(name,false,0,!screen && type!=OBJ_VLINE,f[14],f[24],errors,status);
+   Coordinate(name,true,1,second,f[15],f[25],errors,status);Coordinate(name,false,1,second,f[16],f[26],errors,status);
+  }else status+=";type=UNAVAILABLE_OR_INVALID";
+  ResetLastError();long color=ObjectGetInteger(diagnosticsChart,name,OBJPROP_COLOR,0);int ce=GetLastError();if(ce==0 && color>=0 && color<=16777215)f[17]=Num(color);else status+=";color=UNAVAILABLE_OR_NONE";errors+=";color="+Num(ce)+";color_raw="+Num(color);
+  ResetLastError();long style=ObjectGetInteger(diagnosticsChart,name,OBJPROP_STYLE,0);int se=GetLastError();if(se==0 && style>=0 && style<=4)f[18]=Num(style);else status+=";style=UNAVAILABLE_OR_INVALID";errors+=";style="+Num(se)+";style_raw="+Num(style);
+  ResetLastError();long width=ObjectGetInteger(diagnosticsChart,name,OBJPROP_WIDTH,0);int we=GetLastError();if(we==0 && width>=1 && width<=2147483647)f[19]=Num(width);else status+=";width=UNAVAILABLE_OR_INVALID";errors+=";width="+Num(we)+";width_raw="+Num(width);
+  ResetLastError();string text=ObjectGetString(diagnosticsChart,name,OBJPROP_TEXT,0);int de=GetLastError();if(de==0)f[20]=EscapeObjectText(text);else status+=";description=READ_ERROR";errors+=";description="+Num(de);
+  f[21]=status;f[22]=errors;if(!WriteObjectRow(f))return false;enumerated++;
+ }
+ string summary[];ObjectRowBase(summary,snapshot,phase,-1,total);
+ ResetLastError();int after=ObjectsTotal(diagnosticsChart,-1,-1);int afterError=GetLastError();
+ summary[22]="total_error="+Num(totalError)+";after_count="+Num(after)+";after_error="+Num(afterError)+";enumerated="+Num(enumerated);
+ summary[21]=totalError!=0 || total<0 ? "OBJECT_ENUMERATION_ERROR" : (total==0 ? "NO_OBJECTS" : (limit<total ? "OBJECT_LIMIT_REACHED_PARTIAL" : "SNAPSHOT_COMPLETE_SOURCE_UNVERIFIED"));
+ if(totalError==0 && total>0 && enumerated!=limit)summary[21]+=";PARTIAL_OBJECT_READ_OR_REMOVED";
+ if(afterError!=0 || after<0)summary[21]+=";AFTER_ENUMERATION_UNAVAILABLE";
+ else if(totalError==0 && total>=0 && after!=total)summary[21]+=";OBJECTS_CHANGED_DURING_SNAPSHOT";
+ if(total==0 && totalError==0)Print("BSM_OBJECTS_ZERO; chart=",diagnosticsChart,"; phase=",phase,"; snapshot=",snapshot);
+ else Print("BSM_OBJECTS_SNAPSHOT; chart=",diagnosticsChart,"; count=",total,"; phase=",phase,"; status=",summary[21]);
+ return WriteObjectRow(summary);
+}
+bool RecordRuntimeContext(){
+ SeriesContext c;InspectSeries(iTime(Symbol(),PERIOD_M1,1),c);RefreshDllContext();
+ Print("BSM_RUNTIME_CONTEXT; chart=",diagnosticsChart,"; ea_dll_allowed=",dllAllowed,"; indicator_init=UNVERIFIED; Experts/Journal logs cannot be read by this EA");
+ if(!WriteBufferDiagnostic(c,"SESSION",diagnosticsSession,-1,-1,"NOT_READ","NOT_SAMPLED",0,false))return false;
+ return SnapshotObjects("BEFORE_FIRST_ICUSTOM");
 }
 bool WriteLedger(string &f[]){
  ResetLastError();uint bytes=FileWrite(ledger,f[0],f[1],f[2],f[3],f[4],f[5],f[6],f[7],f[8],f[9],f[10],f[11],f[12],f[13],f[14],f[15],f[16],f[17],f[18],f[19],f[20],f[21],f[22],f[23],f[24],f[25],f[26],f[27],f[28],f[29],f[30],f[31],f[32],f[33],f[34],f[35],f[36],f[37],f[38],f[39],f[40],f[41],f[42],f[43],f[44],f[45],f[46],f[47],f[48],f[49]);int error=GetLastError();
@@ -121,38 +266,50 @@ bool WriteRawSample(datetime bar,int mode,string value,string status,int error){
  ResetLastError();uint count=FileWrite(rawFile,VERSION,(long)TimeCurrent(),Symbol(),"M1",(long)bar,mode,value,status,error,config,"ICUSTOM_EXPLICIT5_CHART_MATCH_UNVERIFIED","COMMIT");int writeError=GetLastError();
  if(count==0 || writeError!=0 || !Flush(rawFile)){Stop("RAW_WRITE_OR_FLUSH_FAILED");return false;}return true;
 }
-bool Probe(datetime bar,int shift,double reference,double &redValue,string &redStatus,double &blueValue,string &blueStatus){
+bool ProbeContext(SeriesContext &initial,int shift,double reference,double &redValue,string &redStatus,double &blueValue,string &blueStatus){
  redValue=0;blueValue=0;redStatus="UNCONFIGURED";blueStatus="UNCONFIGURED";int firstError=0,firstMode=-1;
- datetime anchor=iTime(Symbol(),PERIOD_M1,0);
+ probeBatch++;string sample=diagnosticsSession+"|P|"+Num(probeBatch)+"|"+Num(diagnosticsSequence+1);activeProbeSample=sample;RefreshDllContext();bool calledAny=false;
+ bool explicitSample=initial.requested==DiagnosticBarTime || initial.requested==DiagnosticBarTime2;
+ bool trace=!firstIcustomSnapshotDone || explicitSample;
+ if(explicitSample && firstIcustomSnapshotDone && !SnapshotObjects("BEFORE_DIAGNOSTIC_BATCH"))return false;
+ if(trace)Print("BSM_ICUSTOM_BATCH_BEGIN; sample=",sample,"; requested=",(long)initial.requested,"; resolved_shift=",initial.shift,"; actual=",(long)initial.actual,"; mapping=",initial.mapping,"; ea_dll_allowed=",dllAllowed);
  for(int mode=0;mode<=ProbeMaxMode;mode++){
-  double value=0;int error=0;string status="UNSUPPORTED_MT4_MODE",raw="NOT_READ";
+  RefreshDllContext();SeriesContext c=initial;double value=0;int error=0,rawError=0;bool called=false;
+  string status="UNSUPPORTED_MT4_MODE",raw="NOT_READ";
   if(mode<=7){
-   if(shift<1 || iTime(Symbol(),PERIOD_M1,shift)!=bar)status="DIAGNOSTIC_BAR_UNAVAILABLE";
+   if(c.mapping!="EXACT_CLOSED_BAR" || shift!=c.shift){
+    status="DIAGNOSTIC_BAR_UNAVAILABLE";if(c.mapping=="EXACT_CLOSED_BAR")c.mapping="RESOLVED_SHIFT_MISMATCH";
+    rawError=c.lookupError!=0 ? c.lookupError : (c.timeError!=0 ? c.timeError : (c.barsError!=0 ? c.barsError : c.priceError));
+   }else if(dllAllowed!="false")status="DLL_CONTEXT_BLOCKED";
    else{
-    ResetLastError();value=iCustom(Symbol(),PERIOD_M1,IndicatorName,SignalPeriod,ArrowPeriod,SL_pips,AlertON,Email,mode,shift);error=GetLastError();raw=RawValue(value);
-    status=DotStatus(value,error,reference,DotPriceRatioLimit);
-    if(status=="PRICE" && !Positive(NormalizeDouble(value,Digits)))status="INVALID_NORMALIZED_PRICE";
-    if(iTime(Symbol(),PERIOD_M1,0)!=anchor || iTime(Symbol(),PERIOD_M1,shift)!=bar)status="SERIES_CHANGED_DURING_READ";
+    ResetLastError();datetime before=iTime(Symbol(),PERIOD_M1,shift);int beforeError=GetLastError();
+    if(beforeError!=0 || before!=c.requested){c.actual=before;c.timeError=beforeError;c.mapping="BAR_TIME_MISMATCH";status="DIAGNOSTIC_BAR_UNAVAILABLE";rawError=beforeError;}
+    else{
+     ResetLastError();value=iCustom(Symbol(),PERIOD_M1,IndicatorName,SignalPeriod,ArrowPeriod,SL_pips,AlertON,Email,mode,shift);error=GetLastError();rawError=error;called=true;calledAny=true;raw=RawValue(value);
+     status=DotStatus(value,error,reference,DotPriceRatioLimit);if(status=="PRICE" && !Positive(NormalizeDouble(value,Digits)))status="INVALID_NORMALIZED_PRICE";
+     ResetLastError();c.actual=iTime(Symbol(),PERIOD_M1,shift);c.timeError=GetLastError();
+     ResetLastError();datetime afterAnchor=iTime(Symbol(),PERIOD_M1,0);c.anchorError=GetLastError();
+     if(c.timeError!=0 || c.anchorError!=0 || afterAnchor!=c.anchor || c.actual!=c.requested){status="SERIES_CHANGED_DURING_READ";c.mapping="SERIES_CHANGED_DURING_READ";}
+    }
    }
   }
   if(error!=0 && firstMode<0){firstMode=mode;firstError=error;}
   if(mode==RedDotMode){redValue=value;redStatus=status;}if(mode==BlueDotMode){blueValue=value;blueStatus=status;}
-  if(!WriteRawSample(bar,mode,raw,status,error))return false;
+  if(!WriteRawSample(initial.requested,mode,raw,status,rawError) || !WriteBufferDiagnostic(c,"BUFFER",sample,shift,mode,raw,status,error,called))return false;
  }
- if(firstMode>=0)Print("BSM_INDICATOR_READ_ERROR; bar=",(long)bar,"; mode=",firstMode,"; error=",firstError);
+ if(firstMode>=0)Print("BSM_INDICATOR_READ_ERROR; bar=",(long)initial.requested,"; mode=",firstMode,"; error=",firstError);
+ if(trace)Print("BSM_ICUSTOM_BATCH_END; sample=",sample,"; indicator_init=UNVERIFIED_REVIEW_EXPERTS_LOG");
+ if(calledAny && (!firstIcustomSnapshotDone || explicitSample)){string phase=firstIcustomSnapshotDone ? "AFTER_DIAGNOSTIC_ICUSTOM" : "AFTER_FIRST_ICUSTOM";firstIcustomSnapshotDone=true;if(!SnapshotObjects(phase))return false;}
  return true;
 }
-void RunDiagnostic(){
- ResetLastError();int shift=iBarShift(Symbol(),PERIOD_M1,DiagnosticBarTime,true);int lookupError=GetLastError();
- ResetLastError();datetime actual=shift>=1 ? iTime(Symbol(),PERIOD_M1,shift) : 0;int timeError=GetLastError();
- ResetLastError();double reference=shift>=1 ? iClose(Symbol(),PERIOD_M1,shift) : 0;int priceError=GetLastError();
- Print("BSM_DIAGNOSTIC requested=",(long)DiagnosticBarTime,"; actual=",(long)actual,"; shift=",shift,"; lookup_error=",lookupError,"; time_error=",timeError,"; price_error=",priceError,"; inputs=",config);
- if(lookupError!=0 || timeError!=0 || priceError!=0 || shift<1 || actual!=DiagnosticBarTime || !Positive(reference)){
-  int error=lookupError!=0 ? lookupError : (timeError!=0 ? timeError : priceError);
-  for(int mode=0;mode<=ProbeMaxMode;mode++)if(!WriteRawSample(DiagnosticBarTime,mode,"NOT_READ",mode<=7 ? "DIAGNOSTIC_BAR_UNAVAILABLE" : "UNSUPPORTED_MT4_MODE",error))return;
-  Print("BSM_DIAGNOSTIC_BAR_UNAVAILABLE; requested=",(long)DiagnosticBarTime);return;
- }
- double r,b;string rs,bs;Probe(DiagnosticBarTime,shift,reference,r,rs,b,bs);
+bool Probe(datetime bar,int shift,double reference,double &redValue,string &redStatus,double &blueValue,string &blueStatus){
+ SeriesContext c;InspectSeries(bar,c);return ProbeContext(c,shift,reference,redValue,redStatus,blueValue,blueStatus);
+}
+void RunDiagnostic(datetime requested){
+ SeriesContext c;InspectSeries(requested,c);
+ Print("BSM_DIAGNOSTIC requested=",(long)requested,"; actual=",(long)c.actual,"; shift=",c.shift,"; lookup_error=",c.lookupError,"; time_error=",c.timeError,"; price_error=",c.priceError,"; mapping=",c.mapping,"; inputs=",config);
+ double r,b;string rs,bs;ProbeContext(c,c.shift,c.reference,r,rs,b,bs);
+ if(c.mapping!="EXACT_CLOSED_BAR")Print("BSM_DIAGNOSTIC_BAR_UNAVAILABLE; requested=",(long)requested);
 }
 void BaseRow(string &f[],string event,datetime bar){
  ArrayResize(f,COLS);for(int i=0;i<COLS;i++)f[i]="";
@@ -208,20 +365,23 @@ void Poll(bool newBars){
  if(reference<=0 || bar<=0){if(!historyLogged)Print("BSM_M1_HISTORY_UNAVAILABLE");historyLogged=true;busy=false;return;}historyLogged=false;
  if(newBars && reference!=seenOpen){seenOpen=reference;ProcessBar(reference,bar);}busy=false;
 }
-void OnDeinit(const int reason){Print("BSM_DEINIT reason=",reason);if(ledger!=INVALID_HANDLE){FileClose(ledger);ledger=INVALID_HANDLE;}if(rawFile!=INVALID_HANDLE){FileClose(rawFile);rawFile=INVALID_HANDLE;}EventKillTimer();}
+void OnDeinit(const int reason){if(diagnosticsFile!=INVALID_HANDLE){FileClose(diagnosticsFile);diagnosticsFile=INVALID_HANDLE;}if(objectsFile!=INVALID_HANDLE){FileClose(objectsFile);objectsFile=INVALID_HANDLE;}Print("BSM_DEINIT reason=",reason);if(ledger!=INVALID_HANDLE){FileClose(ledger);ledger=INVALID_HANDLE;}if(rawFile!=INVALID_HANDLE){FileClose(rawFile);rawFile=INVALID_HANDLE;}EventKillTimer();}
 int OnInit(){
  halted=false;busy=false;sequence=0;cursor=0;seenOpen=0;ClearGroup(red);ClearGroup(blue);ArrayResize(pending,0);
  for(int i=0;i<600;i++){quoteTimes[i]=0;quoteBids[i]=0;}
- if(SignalPeriod<1 || SignalPeriod>10000 || ArrowPeriod<1 || ArrowPeriod>10000 || SL_pips<0 || SL_pips>1000000 || Period()!=PERIOD_M1 || !SafeName(Symbol()) || !SafeName(IndicatorName) || ProbeMaxMode<0 || ProbeMaxMode>15 || MinimumHorizontalDots<5 || MinimumHorizontalDots>10000 || !MathIsValidNumber(DotPriceRatioLimit) || DotPriceRatioLimit<1 || DotPriceRatioLimit>1000 ||
+ if(ObjectSnapshotLimit<0 || ObjectSnapshotLimit>100000 || SignalPeriod<1 || SignalPeriod>10000 || ArrowPeriod<1 || ArrowPeriod>10000 || SL_pips<0 || SL_pips>1000000 || Period()!=PERIOD_M1 || !SafeName(Symbol()) || !SafeName(IndicatorName) || ProbeMaxMode<0 || ProbeMaxMode>15 || MinimumHorizontalDots<5 || MinimumHorizontalDots>10000 || !MathIsValidNumber(DotPriceRatioLimit) || DotPriceRatioLimit<1 || DotPriceRatioLimit>1000 ||
     RedDotMode < -1 || RedDotMode>7 || BlueDotMode < -1 || BlueDotMode>7 || (BuffersConfirmed && (RedDotMode<0 || BlueDotMode<0 || RedDotMode==BlueDotMode || RedDotMode>ProbeMaxMode || BlueDotMode>ProbeMaxMode)))return INIT_PARAMETERS_INCORRECT;
  config=Configuration();restoredConfig="";if(!OpenFiles()){Stop("INVALID_PARTIAL_OR_LOCKED_FILE_NO_REWRITE");OnDeinit(0);return INIT_FAILED;}
+ if(!OpenDiagnostics()){Stop("DIAGNOSTICS_OPEN_HEADER_OR_SEQUENCE_FAILURE_NO_REWRITE");OnDeinit(0);return INIT_FAILED;}
+ if(!RecordRuntimeContext()){OnDeinit(0);return INIT_FAILED;}
  datetime reference=iTime(Symbol(),PERIOD_M1,0),bar=iTime(Symbol(),PERIOD_M1,1);
  if(reference<=0 || bar<=0 || cursor>bar){Stop("HISTORY_NOT_READY_OR_BACKWARDS");OnDeinit(0);return INIT_FAILED;}
  if(cursor<bar)ResetAt(bar,cursor==0?"STARTUP_NO_HISTORICAL_CANDIDATES":"RESTART_GAP_NO_BACKFILL");
  if(restoredConfig!="" && restoredConfig!=config)ResetAt(bar,"CONFIG_CHANGED_GROUPS_RESET","CONFIG");
  seenOpen=reference;if(halted || !EventSetTimer(1)){OnDeinit(0);return INIT_FAILED;}
- if(DiagnosticBarTime>0)RunDiagnostic();
- Print("BSM build=1.02; recorder=",VERSION,"; confirmed=",BuffersConfirmed,"; no orders; review indicator runtime logs");return halted?INIT_FAILED:INIT_SUCCEEDED;
+ if(DiagnosticBarTime>0)RunDiagnostic(DiagnosticBarTime);
+ if(!halted && DiagnosticBarTime2>0 && DiagnosticBarTime2!=DiagnosticBarTime)RunDiagnostic(DiagnosticBarTime2);
+ Print("BSM build=1.03; recorder=",VERSION,"; confirmed=",BuffersConfirmed,"; no orders; indicator initialization UNVERIFIED; review Experts/Journal logs");return halted?INIT_FAILED:INIT_SUCCEEDED;
 }
 void OnTick(){Poll(true);}
 void OnTimer(){Poll(false);}

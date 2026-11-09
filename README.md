@@ -4,6 +4,10 @@ MT4用 `buy-sell-magic1.ex4` の**独立した記録専用EA**です。M1確定�
 
 **初期状態はバッファ調査専用**です。赤・青のmodeは未確定のため、`BuffersConfirmed=false`、両mode=-1で起動します。実測で確認するまで候補を作りません。EX4は本納品に含みません。
 
+## v1.03のオブジェクト・実行状態診断
+
+チャートオブジェクト（BSMObjects）と詳細iCustom/バー/DLLコンテキスト（BSMDiagnostics）を別CSVへ記録します。EA側のDLL許可がOFFと確認できた場合のみiCustomを呼び、許可設定は変更しません。価格の取得方法の切り分けとログの読み方は [docs/V103_DIAGNOSTICS.md](docs/V103_DIAGNOSTICS.md) を参照してください。
+
 ## v1.02のインジケーター入力
 
 SignalPeriod=12、ArrowPeriod=2、SL_pips=100、AlertON=true、Email=trueをEAのinputとして追加し、iCustomへこの順で明示渡しします。記録した設定と2026.11.09 09:43の158.098を照合する方法は [docs/INDICATOR_INPUTS.md](docs/INDICATOR_INPUTS.md) を参照してください。
@@ -29,7 +33,7 @@ MQL4の予約語`final`と衝突するEA側の結果確定フラグを`isSettled
 2. 正規の `buy-sell-magic1.ex4` を **MQL4/Indicators/** に置きます。EX4は改変しません。
 3. 本体mq4を **MQL4/Experts/**、共通mqhを **MQL4/Include/** へ置きます。MetaEditorで **BuySellMagicRecorder.mq4** を開きコンパイルします。mqh単体をコンパイルしません。実際のerrors/warningsを確認してください。本環境ではMetaEditorコンパイル未実施です。
 4. **既存EAを載せていない新しいUSDJPY・M1チャートを1枚**開き、このEAを置きます。M3-SIGNAL等が稼働するチャートのEAを置き換えないでください。最初はバッファ設定を初期値のままにします。自動売買OFFでもティック/タイマーの記録を行う設計です。
-5. Expertsの `BSM build=1.02; recorder=1.00; confirmed=false` と、MQL4/FilesにできるBSM専用CSVを確認します。EAを複数チャートから同じ銘柄の台帳へ同時起動しないでください。
+5. Expertsの `BSM build=1.03; recorder=1.00; confirmed=false` と、MQL4/FilesにできるBSM専用CSVを確認します。EAを複数チャートから同じ銘柄の台帳へ同時起動しないでください。
 
 ## バッファの実測確認
 
@@ -60,6 +64,9 @@ MQL4の予約語`final`と衝突するEA側の結果確定フラグを`isSettled
 | MinimumHorizontalDots | 5 | 最低連続数。5～10000。4以下へ緩和できません |
 | DotPriceRatioLimit | 10.0 | 正の生値を終値÷倍率～終値×倍率の範囲で価格候補として扱う。1～1000。極端な値を除外する検証用の上限で、指標仕様ではありません |
 | DiagnosticBarTime | 0 | 任意の閉じたM1足を生値だけ照合。0は追加調査なし |
+| DiagnosticBarTime2 | 0 | 2つ目の過去足診断。同じ日時は重複実行しない |
+| CollectChartObjects | true | 起動前後/指定診断時の現在チャートのオブジェクトを読取り専用で記録 |
+| ObjectSnapshotLimit | 0 | 0は全件、1～100000は上限。切り詰めた場合は明示的にPARTIALと記録 |
 
 許容価格差は**0 points固定**です。ドット価格を銘柄のDigitsへNormalizeDoubleし、同じ桁の文字列で完全一致を検査します。3桁・5桁等に対応します。元の生値は別に保存します。
 
@@ -74,7 +81,7 @@ MQL4の予約語`final`と衝突するEA側の結果確定フラグを`isSettled
 
 価格が1 pointでも変われば新しい群の1個目、-1/EMPTY_VALUEや欠落なら群をリセットします。未確定足の価格・ドットは群や判定に使いません。M1のshift=0は新足の時刻確認だけです。
 
-ゼロ・負数（-1以外）・非有限値・不自然な価格・取得エラーは価格として扱いません。**選択した赤/青のどちらかに異常/読取失敗があれば候補を作らず、両群をリセット**します。-1/EMPTY_VALUEは正常な「ドットなし」で、ブレイク足での消失を許容します。
+ゼロ・負数（-1以外）・非有限値・不自然な価格・取得エラーは価格として扱いません。v1.03ではEAのDLL許可がONまたは取得不能の場合、iCustomを呼ばずDLL_CONTEXT_BLOCKEDとして記録します。OFFへの自動変更もしません。**選択した赤/青のどちらかに異常/読取失敗があれば候補を作らず、両群をリセット**します。-1/EMPTY_VALUEは正常な「ドットなし」で、ブレイク足での消失を許容します。
 
 サイン台帳のBAR行は候補の有無にかかわらず毎確定足を記録し、HIGH/LOWそれぞれの見送り理由を残します。OnTimerは結果処理だけを行い、新しい足の候補判定はOnTickだけです。
 
@@ -92,6 +99,8 @@ MQL4の予約語`final`と衝突するEA側の結果確定フラグを`isSettled
 
 - `BSMRecorder_<銘柄>_M1_v1.csv`：50列、追記専用。BAR/RESET/CONFIG/THEORYイベント。群の全状態と候補を同じ1行へ保存してからメモリを更新します。
 - `BSMRaw_<銘柄>_M1_v1.csv`：12列、全modeの生値・判定状態・エラー。原本の診断履歴です。
+- `BSMDiagnostics_<銘柄>_M1_v1.csv`：41列、入力5項目、時刻/shift/エラー、EA側DLL状態。
+- `BSMObjects_<銘柄>_M1_v1.csv`：30列、現在チャートのオブジェクト属性とスナップショット集計。ドットの役割は自動判定しません。
 
 候補キーは `銘柄|M1|ブレイク足epoch`。陽線HIGHと陰線LOWは同時成立しないため方向なしでも一意です。復元では列・連番・COMMIT・キー・群の遷移・使用済み状態・結果の時刻と価格の整合性を検査します。既存の群と結果待ちを復元し、同じ足や使用済み群を再記録しません。
 

@@ -8,3 +8,7 @@ private/
 reports/
 __pycache__/
 *.pyc
+
+# v1.03 chart and runtime diagnostics can contain private chart text.
+BSMObjects_*.csv
+BSMDiagnostics_*.csv

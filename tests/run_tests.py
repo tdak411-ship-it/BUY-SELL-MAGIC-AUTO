@@ -5,6 +5,7 @@ from pathlib import Path
 import re
 import subprocess
 import tempfile
+from urllib.parse import unquote
 from check_mql_identifiers import check_mql_identifiers, regression_checks
 ROOT=Path(__file__).resolve().parents[1]
 regression_checks()
@@ -27,8 +28,126 @@ void breakout(bool high=true,double dot=-1){
  currentBar+=60;now=currentBar;tick={now,high?101.:99.};candle.o=100;candle.h=102;candle.l=98;candle.c=high?101:99;
  buffers[{0,1}]={high?dot:-1,0};buffers[{1,1}]={high?-1:dot,0};OnTick();
 }
+
+void exportMockFiles(string folder){for(auto& entry:disk){std::ofstream f(folder+"/"+entry.first);for(auto& row:entry.second){for(size_t i=0;i<row.size();i++){if(i)f<<',';f<<row[i];}f<<'\n';}}}
+void v103Case(string test,string folder){
+ if(test=="v103-restore"){
+  string names[]={"BSMRecorder_USDJPY_M1_v1.csv","BSMRaw_USDJPY_M1_v1.csv","BSMDiagnostics_USDJPY_M1_v1.csv","BSMObjects_USDJPY_M1_v1.csv"};
+  for(string name:names){std::ifstream f(folder+"/"+name);string line;while(std::getline(f,line)){std::vector<string> row;StringSplit(line,',',row);disk[name].push_back(row);}}
+  auto primary=disk[names[0]],raw=disk[names[1]],diagnostics=disk[names[2]],objects=disk[names[3]];
+  currentBar=StringToInteger(primary.back()[37])+60;now=currentBar;tick={now,158};
+  assert(OnInit()==0 && candidates()==0 && disk[names[0]]==primary && disk[names[1]]==raw);
+  assert(disk[names[2]].size()==diagnostics.size()+1 && disk[names[3]].size()==objects.size()+1);
+  for(size_t i=0;i<diagnostics.size();i++)assert(disk[names[2]][i]==diagnostics[i]);
+  for(size_t i=0;i<objects.size();i++)assert(disk[names[3]][i]==objects[i]);return;
+ }
+ BuffersConfirmed=false;DiagnosticBarTime=currentBar-120;
+ bool objectFixture=test=="v103-objects" || test=="v103-invalid-object" || test=="v103-property-error" || test=="v103-limit" || test=="v103-export";
+ if(objectFixture){
+  ChartObject first;first.name="=red,dot%\"\n";first.text="note,\"quoted\"\n%2C";first.time1=DiagnosticBarTime;first.width=6;chartObjects.push_back(first);
+  ChartObject second;second.name="other-indicator-trend";second.type=OBJ_TREND;second.price1=157.924;second.price2=157.924;chartObjects.push_back(second);
+  ChartObject label;label.name="screen-label";label.type=OBJ_LABEL;chartObjects.push_back(label);
+ }
+ if(test=="v103-lines"){
+  ChartObject h;h.type=OBJ_HLINE;h.name="hline";h.time1=0;chartObjects.push_back(h);
+  ChartObject v;v.type=OBJ_VLINE;v.name="vline";v.price1=0;chartObjects.push_back(v);
+ }
+ if(test=="v103-object-change")spawnObjectOnProbe=true;
+ if(test=="v103-invalid-object"){chartObjects[0].price1=std::nan("");chartObjects[0].time1=-1;chartObjects[0].color=-1;chartObjects[0].width=0;chartObjects[1].time2=0;chartObjects[1].price2=EMPTY_VALUE;}
+ if(test=="v103-property-error"){chartObjects[0].errors[{OBJPROP_TIME,0}]=4202;chartObjects[0].errors[{OBJPROP_PRICE,0}]=4202;chartObjects[0].errors[{OBJPROP_TEXT,0}]=4203;}
+ if(test=="v103-enumeration-error")objectsTotalError=4200;
+ if(test=="v103-limit")ObjectSnapshotLimit=1;
+ if(test=="v103-disabled")CollectChartObjects=false;
+ if(test=="v103-mismatch")lookupShiftBias=1;
+ if(test=="v103-history-missing")missingDiagnostic=true;
+ if(test=="v103-bars-missing")availableBars=0;
+ if(test=="v103-dll-query-error")dllQueryError=4000;
+ if(test=="v103-dll-true")dllFlag=true;
+ if(test=="v103-diagnostic-write" || test=="v103-object-write" || test=="v103-diagnostic-flush")DiagnosticBarTime=0;
+ if(test=="v103-dll-reported" || test=="v103-export"){
+  DiagnosticBarTime=1794217380;DiagnosticBarTime2=1794233460;currentBar=DiagnosticBarTime2+60;now=currentBar;tick={now,158};
+  if(!chartObjects.empty()){chartObjects[0].time1=DiagnosticBarTime;chartObjects[1].time1=DiagnosticBarTime2;chartObjects[1].time2=DiagnosticBarTime2+60;}
+  for(datetime bar:{DiagnosticBarTime,DiagnosticBarTime2})for(int mode=0;mode<8;mode++)buffers[{mode,(int)((currentBar-bar)/60)}]={mode<6?EMPTY_VALUE:0,0};
+ }
+ if(test=="v103-values"){
+  buffers[{0,2}]={EMPTY_VALUE,0};buffers[{1,2}]={-1,0};buffers[{2,2}]={0,0};buffers[{3,2}]={158.098,4802};buffers[{4,2}]={158.098,0};
+ }
+ if(test=="v103-mode15")ProbeMaxMode=15;
+ bool originalDll=dllFlag;assert(OnInit()==0);assert(dllFlag==originalDll && candidates()==0);
+ auto &detail=disk[diagnosticsName];auto &objects=disk[objectsName];assert(detail[0].size()==41 && objects[0].size()==30);
+ assert(detail[1][3]=="SESSION" && detail[1][26]=="UNVERIFIED_REVIEW_EXPERTS_LOG");
+ assert(detail[1][35]==(dllQueryError?"UNAVAILABLE":Flag(originalDll)));
+ for(size_t i=1;i<detail.size();i++){assert(detail[i].size()==41 && detail[i][1]==std::to_string(i) && detail[i][40]=="COMMIT");}
+ if(test=="v103-disabled"){assert(objects.size()==1 && detail[1][37]=="false");return;}
+ if(test=="v103-enumeration-error"){assert(objects[1][21].find("OBJECT_ENUMERATION_ERROR")==0 && objects[1][22].find("total_error=4200")!=string::npos);return;}
+ if(test=="v103-mismatch" || test=="v103-history-missing" || test=="v103-bars-missing"){
+  assert(indicatorCalls.empty());auto &row=detail[2];assert(row[20]=="false" && row[21]=="NOT_READ");
+  if(test=="v103-mismatch")assert(row[15]!=row[18] && row[34]=="BAR_TIME_MISMATCH");
+  if(test=="v103-history-missing")assert(row[27]=="4066" && row[23]=="NOT_CALLED" && row[34]=="LOOKUP_ERROR");
+  if(test=="v103-bars-missing")assert(row[24]=="0" && row[34]=="HISTORY_UNAVAILABLE");return;
+ }
+ if(test=="v103-objects" || test=="v103-limit"){
+  auto &row=objects[1];assert(row[13]==std::to_string(DiagnosticBarTime) && row[14]==RawValue(158.098) && row[15]=="NA" && row[16]=="NA" && row[19]=="6");
+  assert(row[11].find("%2C")!=string::npos && row[20].find("%0A")!=string::npos);
+  if(test=="v103-limit")assert(objects[2][21]=="OBJECT_LIMIT_REACHED_PARTIAL");
+  else{assert(objects[2][15]==std::to_string(chartObjects[1].time2) && objects[2][16]==RawValue(157.924));assert(objects[3][13]=="NA" && objects[3][14]=="NA");}return;
+ }
+ if(test=="v103-lines"){
+  ChartObject h;h.type=OBJ_HLINE;h.name="hline";h.time1=0;chartObjects.push_back(h);
+  ChartObject v;v.type=OBJ_VLINE;v.name="vline";v.price1=0;chartObjects.push_back(v);
+ }
+ if(test=="v103-object-change")spawnObjectOnProbe=true;
+ if(test=="v103-invalid-object"){
+  assert(objects[1][13]=="NA" && objects[1][14]=="NA" && objects[1][23]=="-1" && objects[1][24]=="NONFINITE" && objects[1][21].find("INVALID_VALUE")!=string::npos);
+  assert(objects[2][15]=="NA" && objects[2][16]=="NA" && objects[2][26]=="EMPTY_VALUE");return;
+ }
+ if(test=="v103-lines"){
+  assert(objects[1][13]=="NA" && objects[1][14]==RawValue(158.098) && objects[1][23]=="NOT_READ");
+  assert(objects[2][12]=="0" && objects[2][13]==std::to_string(chartObjects[1].time1) && objects[2][14]=="NA" && objects[2][24]=="NOT_READ");return;
+ }
+ if(test=="v103-object-change"){
+  assert(objects[1][21]=="NO_OBJECTS" && objects[2][11]=="created%2Dby%2Dmock%2Dhidden%2Dinstance" && objects[3][21]=="SNAPSHOT_COMPLETE_SOURCE_UNVERIFIED");
+  assert(objects[2][3].find(detail[2][4]+"|O|")==0 && candidates()==0);return;
+ }
+ if(test=="v103-property-error"){assert(objects[1][13]=="NA" && objects[1][20]=="NA" && objects[1][22].find("time1=4202")!=string::npos);return;}
+ if(test=="v103-values"){
+  assert(detail[2][22]=="EMPTY_VALUE" && detail[3][22]=="ABSENT_MINUS_ONE" && detail[4][22]=="INVALID_ZERO");
+  assert(detail[5][21]==RawValue(158.098) && detail[5][23]=="4802" && detail[5][25]=="ICUSTOM_API_ERROR_INIT_UNVERIFIED");
+  assert(detail[6][22]=="PRICE" && detail[6][25]=="PRICE_RETURNED_CHART_MATCH_UNVERIFIED");return;
+ }
+ if(test=="v103-mode15"){assert(indicatorCalls.size()==8);for(size_t i=10;i<detail.size();i++)assert(detail[i][20]=="false" && detail[i][22]=="UNSUPPORTED_MT4_MODE");return;}
+ if(test=="v103-dll-reported" || test=="v103-export"){
+  assert(detail.size()==18 && indicatorCalls.size()==16);
+  for(size_t i=2;i<detail.size();i++){
+   assert(detail[i][15]==detail[i][18] && detail[i][23]=="0" && detail[i][35]=="false" && detail[i][26]=="UNVERIFIED_REVIEW_EXPERTS_LOG");
+   int mode=std::stoi(detail[i][19]);assert(detail[i][22]==(mode<6?"EMPTY_VALUE":"INVALID_ZERO"));
+  }
+  if(test=="v103-export")exportMockFiles(folder);return;
+ }
+ if(test=="v103-diagnostic-write" || test=="v103-object-write" || test=="v103-diagnostic-flush"){
+  auto before=disk[ledgerName];failWrite=test=="v103-diagnostic-flush"?2:1;failName=test=="v103-object-write"?objectsName:diagnosticsName;
+  step();assert(halted && candidates()==0 && disk[ledgerName]==before);return;
+ }
+ if(test=="v103-corrupt-diagnostic"){
+  OnDeinit(0);disk[diagnosticsName].back().pop_back();auto before=disk[diagnosticsName];auto primary=disk[ledgerName];
+  assert(OnInit()==INIT_FAILED && disk[diagnosticsName]==before && disk[ledgerName]==primary);return;
+ }
+ if(test=="v103-restart"){
+  auto before=disk[diagnosticsName];auto objectBefore=disk[objectsName];auto primary=disk[ledgerName];string session=diagnosticsSession;
+  restart();assert(diagnosticsSession!=session && disk[ledgerName]==primary && candidates()==0);
+  for(size_t i=0;i<before.size();i++)assert(disk[diagnosticsName][i]==before[i]);
+  for(size_t i=0;i<objectBefore.size();i++)assert(disk[objectsName][i]==objectBefore[i]);
+  for(size_t i=1;i<disk[diagnosticsName].size();i++)assert(disk[diagnosticsName][i][1]==std::to_string(i));return;
+ }
+ if(test=="v103-zero"){
+  assert(objects.size()==3 && objects[1][21]=="NO_OBJECTS" && objects[2][21]=="NO_OBJECTS");
+  bool found=false;for(string log:logs)if(log.find("BSM_OBJECTS_ZERO")!=string::npos)found=true;assert(found);return;
+ }
+ if(test=="v103-dll-query-error"){assert(detail[1][36]=="4000" && indicatorCalls.empty() && detail[2][22]=="DLL_CONTEXT_BLOCKED");}
+ if(test=="v103-dll-true"){assert(indicatorCalls.empty() && dllFlag && detail[2][20]=="false" && detail[2][25]=="DLL_CONTEXT_NOT_FALSE_NOT_CALLED");}
+}
 int main(int argc,char** argv){
- assert(argc>=2);string test=argv[1];assert(!BuffersConfirmed && RedDotMode==-1 && BlueDotMode==-1);BuffersConfirmed=true;RedDotMode=0;BlueDotMode=1;
+ assert(argc>=2);string test=argv[1];assert(!BuffersConfirmed && RedDotMode==-1 && BlueDotMode==-1);if(test.find("v103-")==0){v103Case(test,argc>2?argv[2]:"");return 0;}BuffersConfirmed=true;RedDotMode=0;BlueDotMode=1;
  if(test=="input-custom"){SignalPeriod=20;ArrowPeriod=4;SL_pips=75;AlertON=false;Email=false;}
  if(test=="invalid-signal-period"){SignalPeriod=0;assert(OnInit()==INIT_PARAMETERS_INCORRECT && disk.empty());return 0;}
  if(test=="invalid-arrow-period"){ArrowPeriod=0;assert(OnInit()==INIT_PARAMETERS_INCORRECT && disk.empty());return 0;}
@@ -149,7 +268,7 @@ int main(int argc,char** argv){
  std::cout<<"passed "<<test<<"\n";
 }
 '''
-cases=['high','low','four','point-change','missing','normalize','wick','doji','read-error','invalid-values','duplicate','restart-group','restart-pending','restart-gap','gap','disconnect','timer-only','unconfirmed','config-change','modes-15','late-entry','unknown-expiry','loss','draw','corrupt','header-mismatch','writer-lock','ledger-write-failure','raw-write-failure','flush-failure','open-above','changed-break-dot','corrupt-consumed','low-theory','config-pending','invalid-mode','invalid-min','digits-five','low-wick','group-six','diagnostic-time','stale-timer','input-defaults','input-custom','invalid-signal-period','invalid-arrow-period','invalid-sl-pips','diagnostic-target','diagnostic-unavailable','diagnostic-read-error','legacy-input-transition','diagnostic-series-change','diagnostic-forming']
+cases=['high','low','four','point-change','missing','normalize','wick','doji','read-error','invalid-values','duplicate','restart-group','restart-pending','restart-gap','gap','disconnect','timer-only','unconfirmed','config-change','modes-15','late-entry','unknown-expiry','loss','draw','corrupt','header-mismatch','writer-lock','ledger-write-failure','raw-write-failure','flush-failure','open-above','changed-break-dot','corrupt-consumed','low-theory','config-pending','invalid-mode','invalid-min','digits-five','low-wick','group-six','diagnostic-time','stale-timer','input-defaults','input-custom','invalid-signal-period','invalid-arrow-period','invalid-sl-pips','diagnostic-target','diagnostic-unavailable','diagnostic-read-error','legacy-input-transition','diagnostic-series-change','diagnostic-forming','v103-zero','v103-objects','v103-invalid-object','v103-property-error','v103-enumeration-error','v103-limit','v103-disabled','v103-mismatch','v103-history-missing','v103-bars-missing','v103-values','v103-mode15','v103-dll-reported','v103-dll-query-error','v103-dll-true','v103-diagnostic-write','v103-object-write','v103-diagnostic-flush','v103-corrupt-diagnostic','v103-restart','v103-lines','v103-object-change']
 with tempfile.TemporaryDirectory(prefix='bsm-tests-') as folder:
     p=Path(folder);(p/'tests.cpp').write_text(source+main)
     subprocess.run(['g++','-std=c++11','-Wall','-Wextra','-Werror','-Wno-misleading-indentation','-fsanitize=address,undefined','-g',str(p/'tests.cpp'),'-o',str(p/'tests')],check=True)
@@ -170,6 +289,20 @@ with tempfile.TemporaryDirectory(prefix='bsm-tests-') as folder:
     with (p/'BSMRaw_USDJPY_M1_v1.csv').open() as f:
         rows=list(csv.reader(f));assert all(len(r)==12 for r in rows)
         assert {r[5] for r in rows[1:]}==set(map(str,range(8)))
-for term in ('OrderSend','OrderClose','WebRequest','#import','ShellExecute','http://','https://'):
+    diagFolder=p/'diagnostic_export';diagFolder.mkdir()
+    subprocess.run([str(p/'tests'),'v103-export',str(diagFolder)],check=True)
+    with (diagFolder/'BSMDiagnostics_USDJPY_M1_v1.csv').open() as f: diagnostics=list(csv.DictReader(f))
+    assert len(diagnostics)==17 and all(len(r)==41 and r['end']=='COMMIT' for r in diagnostics)
+    buffers=[r for r in diagnostics if r['event']=='BUFFER']
+    assert len(buffers)==16 and {r['requested_bar_time'] for r in buffers}=={'1794217380','1794233460'}
+    assert all(r['requested_bar_time']==r['actual_bar_time'] and r['GetLastError']=='0' and r['ea_dll_allowed']=='false' and r['indicator_init_status']=='UNVERIFIED_REVIEW_EXPERTS_LOG' for r in buffers)
+    assert all([r[k] for k in ('SignalPeriod','ArrowPeriod','SL_pips','AlertON','Email')]==['12','2','100','true','true'] for r in buffers)
+    with (diagFolder/'BSMObjects_USDJPY_M1_v1.csv').open() as f: objects=list(csv.DictReader(f))
+    assert len(objects)==16 and all(len(r)==30 and r['end']=='COMMIT' for r in objects)
+    assert unquote(objects[0]['object_name'])=='=red,dot%"\n'
+    assert unquote(objects[0]['object_description'])=='note,"quoted"\n%2C'
+    assert all(r['source']=='CURRENT_CHART_OBJECTS_NO_SIGNAL_INFERENCE' for r in objects)
+    subprocess.run([str(p/'tests'),'v103-restore',str(diagFolder)],check=True)
+for term in ('OrderSend','OrderClose','WebRequest','#import','ShellExecute','http://','https://','ObjectCreate(', 'ObjectDelete(', 'ObjectSet', 'ChartSet', 'ShellExecute', 'WinExec'):
     assert term not in ea+core
 print(f'{len(cases)} actual-code host scenarios plus CSV integration passed; MetaEditor/MT4 not tested.')

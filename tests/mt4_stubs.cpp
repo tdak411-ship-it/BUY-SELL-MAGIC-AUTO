@@ -15,7 +15,8 @@ using string=std::string;using datetime=long long;using uint=unsigned int;
 const int INVALID_HANDLE=-1,PERIOD_M1=1,FILE_READ=1,FILE_WRITE=2,FILE_CSV=4,FILE_ANSI=8,FILE_SHARE_READ=16,CP_UTF8=65001,SEEK_END=2;
 const int INIT_SUCCEEDED=0,INIT_FAILED=-1,INIT_PARAMETERS_INCORRECT=2;
 const double EMPTY_VALUE=2147483647.;int Digits=3,lastError=0;
-datetime now=6000,currentBar=6000;bool missingDiagnostic=false,advanceDuringIndicator=false;bool connected=true;int failWrite=0;string failName="";
+int availableBars=5000,barsApiError=0,lookupShiftBias=0,timeErrorShift=-1;
+datetime now=6000,currentBar=6000;bool missingDiagnostic=false,advanceDuringIndicator=false,spawnObjectOnProbe=false;bool connected=true;int failWrite=0;string failName="";
 std::vector<string> logs;
 struct MqlTick{datetime time;double bid;};MqlTick tick={6000,100};
 struct Candle{double o=99,h=101,l=98,c=100;};Candle candle;
@@ -38,12 +39,15 @@ template<typename T>string cell(T v){std::ostringstream s;s<<v;return s.str();}s
 void printParts(std::ostringstream&){}template<typename T,typename... A>void printParts(std::ostringstream& s,T v,A... a){s<<v;printParts(s,a...);}
 template<typename... A>void Print(A... a){std::ostringstream s;printParts(s,a...);logs.push_back(s.str());}
 bool IsConnected(){return connected;}bool SymbolInfoTick(string,MqlTick& result){result=tick;return true;}
-datetime iTime(string,int,int shift){return currentBar-shift*60;}
-int iBarShift(string,int,datetime time,bool){if(missingDiagnostic){lastError=4066;return -1;}if(time>currentBar)return -1;return (currentBar-time)/60;}
+int iBars(string,int){lastError=barsApiError;return availableBars;}
+datetime iTime(string,int,int shift){if(shift==timeErrorShift){lastError=4073;return 0;}return currentBar-shift*60;}
+int iBarShift(string,int,datetime time,bool){if(missingDiagnostic){lastError=4066;return -1;}if(time>currentBar)return -1;return (currentBar-time)/60+lookupShiftBias;}
 double iOpen(string,int,int){return candle.o;}double iHigh(string,int,int){return candle.h;}double iLow(string,int,int){return candle.l;}double iClose(string,int,int){return candle.c;}
 std::vector<std::tuple<int,int,int,bool,bool,int,int>> indicatorCalls;
+void MaybeAddProbeObject();
 
 double iCustom(string,int,string,int signalPeriod,int arrowPeriod,int stopPips,bool alertOn,bool email,int mode,int shift){
+ if(spawnObjectOnProbe)MaybeAddProbeObject();
  if(advanceDuringIndicator){currentBar+=60;advanceDuringIndicator=false;}
  indicatorCalls.push_back({signalPeriod,arrowPeriod,stopPips,alertOn,email,mode,shift});assert(mode>=0 && mode<=7 && shift>=1);auto it=buffers.find({mode,shift});if(it==buffers.end())return -1;lastError=it->second.second;return it->second.first;}
 bool EventSetTimer(int){return true;}void EventKillTimer(){}
@@ -56,3 +60,36 @@ string FileReadString(int id){auto& h=handles[id];auto& row=disk[h.name][h.row];
 bool FileSeek(int id,long,int){auto& h=handles[id];h.row=disk[h.name].size();h.col=0;h.eol=false;return true;}
 void FileFlush(int id){if(failWrite==2 && handles[id].name==failName)lastError=5004;}
 template<typename... A>uint FileWrite(int id,A... args){auto& h=handles[id];if(failWrite==1 && h.name==failName){lastError=5004;return 0;}std::vector<string> row={cell(args)...};disk[h.name].push_back(row);h.row=disk[h.name].size();return row.size();}
+// Read-only chart/series/DLL-context APIs used by v1.03 diagnostics.
+const int OBJ_VLINE=0,OBJ_HLINE=1,OBJ_TREND=2,OBJ_TEXT=21,OBJ_ARROW=22,OBJ_LABEL=23,OBJ_BUTTON=24,OBJ_BITMAP_LABEL=25,OBJ_EDIT=26,OBJ_RECTANGLE_LABEL=27;
+const int OBJPROP_TYPE=1,OBJPROP_TIME=2,OBJPROP_PRICE=3,OBJPROP_COLOR=4,OBJPROP_STYLE=5,OBJPROP_WIDTH=6,OBJPROP_TEXT=7;
+struct ChartObject {
+ string name,text;long type=OBJ_ARROW,color=255,style=0,width=2;datetime time1=5900,time2=5960;double price1=158.098,price2=157.924;
+ std::map<std::pair<int,int>,int> errors;
+};
+std::vector<ChartObject> chartObjects;bool dllFlag=false;int dllQueryError=0,objectsTotalError=0;
+long ChartID(){return 123456;}uint GetTickCount(){return (uint)(now*1000);}
+bool IsDllsAllowed(){lastError=dllQueryError;return dllFlag;}
+int StringReplace(string &value,string from,string to){int count=0;size_t pos=0;while((pos=value.find(from,pos))!=string::npos){value.replace(pos,from.size(),to);pos+=to.size();count++;}return count;}
+int ObjectsTotal(long chart,int subwindow,int type){assert(chart==ChartID() && subwindow==-1 && type==-1);lastError=objectsTotalError;return objectsTotalError?-1:chartObjects.size();}
+string ObjectName(long chart,int index,int subwindow,int type){assert(chart==ChartID() && subwindow==-1 && type==-1);if(index<0 || index>=(int)chartObjects.size()){lastError=4202;return "";}return chartObjects[index].name;}
+ChartObject* findChartObject(string name){for(auto &object:chartObjects)if(object.name==name)return &object;lastError=4202;return nullptr;}
+long ObjectGetInteger(long chart,string name,int prop,int modifier){
+ assert(chart==ChartID());auto *o=findChartObject(name);if(!o)return 0;
+ auto error=o->errors.find({prop,modifier});if(error!=o->errors.end()){lastError=error->second;return 0;}
+ if(prop==OBJPROP_TYPE)return o->type;if(prop==OBJPROP_TIME)return modifier==0?o->time1:o->time2;
+ if(prop==OBJPROP_COLOR)return o->color;if(prop==OBJPROP_STYLE)return o->style;if(prop==OBJPROP_WIDTH)return o->width;
+ lastError=4203;return 0;
+}
+double ObjectGetDouble(long chart,string name,int prop,int modifier){
+ assert(chart==ChartID());auto *o=findChartObject(name);if(!o)return 0;
+ auto error=o->errors.find({prop,modifier});if(error!=o->errors.end()){lastError=error->second;return 0;}
+ if(prop==OBJPROP_PRICE)return modifier==0?o->price1:o->price2;lastError=4203;return 0;
+}
+string ObjectGetString(long chart,string name,int prop,int modifier){
+ assert(chart==ChartID());auto *o=findChartObject(name);if(!o)return "";
+ auto error=o->errors.find({prop,modifier});if(error!=o->errors.end()){lastError=error->second;return "";}
+ if(prop==OBJPROP_TEXT)return o->text;lastError=4203;return "";
+}
+
+void MaybeAddProbeObject(){spawnObjectOnProbe=false;ChartObject object;object.name="created-by-mock-hidden-instance";chartObjects.push_back(object);}
