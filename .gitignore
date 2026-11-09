@@ -1,0 +1,10 @@
+# Proprietary binaries and live terminal data are never committed.
+*.ex4
+*.EX4
+*.set
+BSMRecorder_*.csv
+BSMRaw_*.csv
+private/
+reports/
+__pycache__/
+*.pyc
