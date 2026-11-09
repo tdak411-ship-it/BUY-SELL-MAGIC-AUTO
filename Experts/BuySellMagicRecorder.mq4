@@ -1,5 +1,5 @@
 #property strict
-#property version "1.00"
+#property version "1.01"
 #property description "Independent Buy Sell Magic buffer probe and closed-M1 breakout evidence recorder. No orders."
 #include <BuySellMagicCore.mqh>
 input string IndicatorName="buy-sell-magic1";
@@ -18,7 +18,7 @@ datetime cursor=0,seenOpen=0;
 DotGroup red,blue;
 bool halted=false,busy=false,disconnectLogged=false,historyLogged=false;
 datetime quoteTimes[600];double quoteBids[600];
-struct PendingTheory { string key,direction,entryBid;datetime bar,entry,expiry;bool final; };
+struct PendingTheory { string key,direction,entryBid;datetime bar,entry,expiry;bool isSettled; };
 PendingTheory pending[];
 string Header(){return "recorder_version|sequence|event|key|server_time|symbol|timeframe|signal_bar_time|detection_time|direction|red_dot_price|blue_dot_price|dot_buffer_mode|dot_count|horizontal_price|breakout_open|breakout_high|breakout_low|breakout_close|breakout_valid|rejection_reason|theoretical_entry_time|theoretical_entry_bid|theoretical_expiry_time|theoretical_expiry_bid|theoretical_result|indicator_read_status|red_group_price|red_group_count|red_group_first|red_group_last|red_group_consumed|blue_group_price|blue_group_count|blue_group_first|blue_group_last|blue_group_consumed|cursor|configuration|source|entry_quote_time|expiry_quote_time|observed_time|result_status|red_read_status|blue_read_status|red_raw|blue_raw|digits|end";}
 string RawHeader(){return "recorder_version|server_time|symbol|timeframe|sample_bar_time|mode|value|value_status|read_error|configuration|source|end";}
@@ -46,7 +46,7 @@ bool LoadGroup(string &f[],int at,datetime atBar,DotGroup &g){
 int FindPending(string key){for(int i=0;i<ArraySize(pending);i++)if(pending[i].key==key)return i;return -1;}
 bool AddPending(string &f[]){
  int n=ArraySize(pending);if(FindPending(f[3])>=0 || ArrayResize(pending,n+1)!=n+1)return false;
- pending[n].key=f[3];pending[n].direction=f[9];pending[n].bar=(datetime)StringToInteger(f[7]);pending[n].entry=(datetime)StringToInteger(f[21]);pending[n].expiry=(datetime)StringToInteger(f[23]);pending[n].entryBid=f[22];pending[n].final=false;return true;
+ pending[n].key=f[3];pending[n].direction=f[9];pending[n].bar=(datetime)StringToInteger(f[7]);pending[n].entry=(datetime)StringToInteger(f[21]);pending[n].expiry=(datetime)StringToInteger(f[23]);pending[n].entryBid=f[22];pending[n].isSettled=false;return true;
 }
 bool Restore(string &f[]){
  if(f[0]!=VERSION || f[1]!=Num(sequence+1) || f[5]!=Symbol() || f[6]!="M1" || f[49]!="COMMIT" || f[39]!="ICUSTOM_DEFAULTS_CLOSED_M1_NO_ORDERS" || f[48]!=Num(Digits))return false;
@@ -76,7 +76,7 @@ bool Restore(string &f[]){
   }
   red=r;blue=b;cursor=bar;restoredConfig=f[38];
  }else if(f[2]=="THEORY"){
-  int index=FindPending(f[3]);if(index<0 || pending[index].final)return false;
+  int index=FindPending(f[3]);if(index<0 || pending[index].isSettled)return false;
   PendingTheory p=pending[index];
   if(f[9]!=p.direction || bar!=p.bar || f[21]!=Num((long)p.entry) || f[23]!=Num((long)p.expiry) || f[22]!=p.entryBid || f[19]!="true" || f[40]!=(p.entryBid=="" ? "0" : f[21]) || StringToInteger(f[42])<=p.expiry || f[37]!=Num((long)cursor))return false;
   string expected="UNKNOWN";
@@ -85,7 +85,7 @@ bool Restore(string &f[]){
   if(f[25]!=expected || f[43]!=(expected=="UNKNOWN" ? "FINAL_UNMEASURED" : "FINAL_MEASURED"))return false;
   string r[];string b[];ArrayResize(r,COLS);ArrayResize(b,COLS);GroupCells(red,r,27);GroupCells(blue,b,32);
   for(int j=27;j<=31;j++)if(f[j]!=r[j])return false;for(int j=32;j<=36;j++)if(f[j]!=b[j])return false;
-  pending[index].final=true;
+  pending[index].isSettled=true;
  }else return false;
  sequence++;return true;
 }
@@ -136,11 +136,11 @@ void CacheQuote(){
 string ExactBid(datetime time){int slot=(int)(time%600);return time>0 && quoteTimes[slot]==time ? DoubleToString(quoteBids[slot],16) : "";}
 void Settle(){
  for(int i=0;i<ArraySize(pending);i++){
-  PendingTheory p=pending[i];if(p.final || TimeCurrent()<=p.expiry)continue;
+  PendingTheory p=pending[i];if(p.isSettled || TimeCurrent()<=p.expiry)continue;
   string f[];BaseRow(f,"THEORY",p.bar);f[3]=p.key;f[9]=p.direction;f[19]="true";f[21]=Num((long)p.entry);f[22]=p.entryBid;f[23]=Num((long)p.expiry);f[24]=ExactBid(p.expiry);f[40]=p.entryBid==""?"0":f[21];f[41]=f[24]==""?"0":f[23];f[42]=Num((long)TimeCurrent());f[37]=Num((long)cursor);
   if(f[22]!="" && f[24]!="")f[25]=TextVerdict(p.direction,f[22],f[24]);
   f[43]=f[25]=="UNKNOWN"?"FINAL_UNMEASURED":"FINAL_MEASURED";
-  if(!WriteLedger(f))return;sequence++;pending[i].final=true;
+  if(!WriteLedger(f))return;sequence++;pending[i].isSettled=true;
  }
 }
 void ResetAt(datetime bar,string reason,string event="RESET"){
@@ -192,7 +192,7 @@ int OnInit(){
  seenOpen=reference;if(halted || !EventSetTimer(1)){OnDeinit(0);return INIT_FAILED;}
  if(DiagnosticBarTime>0){int shift=iBarShift(Symbol(),PERIOD_M1,DiagnosticBarTime,true);double r,b;string rs,bs;
   if(shift>=1 && iTime(Symbol(),PERIOD_M1,shift)==DiagnosticBarTime)Probe(DiagnosticBarTime,shift,iClose(Symbol(),PERIOD_M1,shift),r,rs,b,bs);else Print("BSM_DIAGNOSTIC_BAR_UNAVAILABLE");}
- Print("BSM recorder=",VERSION,"; confirmed=",BuffersConfirmed,"; no orders; review indicator runtime logs");return halted?INIT_FAILED:INIT_SUCCEEDED;
+ Print("BSM build=1.01; recorder=",VERSION,"; confirmed=",BuffersConfirmed,"; no orders; review indicator runtime logs");return halted?INIT_FAILED:INIT_SUCCEEDED;
 }
 void OnTick(){Poll(true);}
 void OnTimer(){Poll(false);}

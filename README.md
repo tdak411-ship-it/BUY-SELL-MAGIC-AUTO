@@ -4,6 +4,10 @@ MT4用 `buy-sell-magic1.ex4` の**独立した記録専用EA**です。M1確定�
 
 **初期状態はバッファ調査専用**です。赤・青のmodeは未確定のため、`BuffersConfirmed=false`、両mode=-1で起動します。実測で確認するまで候補を作りません。EX4は本納品に含みません。
 
+## v1.01のコンパイル識別子修正
+
+MQL4の予約語`final`と衝突するEA側の結果確定フラグを`isSettled`へ変更しました。水平判定・ブレイク・180秒判定・CSV仕様は変更していません。CSVのrecorder_versionは互換性維持のため1.00のまま、EAビルドは1.01です。詳細は [docs/COMPILE_FIX.md](docs/COMPILE_FIX.md) を参照してください。
+
 ## ファイル
 
 | ファイル | 用途 |
@@ -21,7 +25,7 @@ MT4用 `buy-sell-magic1.ex4` の**独立した記録専用EA**です。M1確定�
 2. 正規の `buy-sell-magic1.ex4` を **MQL4/Indicators/** に置きます。EX4は改変しません。
 3. 本体mq4を **MQL4/Experts/**、共通mqhを **MQL4/Include/** へ置きます。MetaEditorで **BuySellMagicRecorder.mq4** を開きコンパイルします。mqh単体をコンパイルしません。実際のerrors/warningsを確認してください。本環境ではMetaEditorコンパイル未実施です。
 4. **既存EAを載せていない新しいUSDJPY・M1チャートを1枚**開き、このEAを置きます。M3-SIGNAL等が稼働するチャートのEAを置き換えないでください。最初はバッファ設定を初期値のままにします。自動売買OFFでもティック/タイマーの記録を行う設計です。
-5. Expertsの `BSM recorder=1.00; confirmed=false` と、MQL4/FilesにできるBSM専用CSVを確認します。EAを複数チャートから同じ銘柄の台帳へ同時起動しないでください。
+5. Expertsの `BSM build=1.01; recorder=1.00; confirmed=false` と、MQL4/FilesにできるBSM専用CSVを確認します。EAを複数チャートから同じ銘柄の台帳へ同時起動しないでください。
 
 ## バッファの実測確認
 

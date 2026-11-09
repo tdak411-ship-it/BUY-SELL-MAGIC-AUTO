@@ -5,7 +5,11 @@ from pathlib import Path
 import re
 import subprocess
 import tempfile
+from check_mql_identifiers import check_mql_identifiers, regression_checks
 ROOT=Path(__file__).resolve().parents[1]
+regression_checks()
+for path in (ROOT/'Include/BuySellMagicCore.mqh',ROOT/'Experts/BuySellMagicRecorder.mq4'):
+    check_mql_identifiers(path.read_text(),str(path))
 core=(ROOT/'Include/BuySellMagicCore.mqh').read_text()
 ea=(ROOT/'Experts/BuySellMagicRecorder.mq4').read_text()
 ea=re.sub(r'^#property.*$|^#include.*$','',ea,flags=re.M)
@@ -35,7 +39,7 @@ int main(int argc,char** argv){
   assert(argc==3);string names[]={"BSMRecorder_USDJPY_M1_v1.csv","BSMRaw_USDJPY_M1_v1.csv"};
   for(string name:names){std::ifstream f(string(argv[2])+"/"+name);string line;while(std::getline(f,line)){std::vector<string> row;StringSplit(line,',',row);disk[name].push_back(row);}}
   auto saved=disk[names[0]];currentBar=StringToInteger(saved.back()[37])+60;now=currentBar;tick={now,100};
-  assert(OnInit()==0 && candidates()==1 && pending[0].final && disk[names[0]]==saved);return 0;
+  assert(OnInit()==0 && candidates()==1 && pending[0].isSettled && disk[names[0]]==saved);return 0;
  }
  assert(OnInit()==0);assert(sequence==1);
  if(test=="diagnostic-time"){assert(candidates()==0 && disk[rawName].size()==9);assert(disk[rawName][1][4]==std::to_string(DiagnosticBarTime));return 0;}
@@ -49,7 +53,7 @@ int main(int argc,char** argv){
   for(double value:{0.,-2.,1e99,std::nan("")})assert(!UsableRead(DotStatus(value,0,100,10)));
   assert(DotStatus(100,4066,100,10)=="READ_ERROR");assert(DotStatus(100,0,0,10)=="NO_REFERENCE_PRICE");return 0;
  }
- if(test=="low-theory"){for(int i=0;i<5;i++)step(-1,100);breakout(false);datetime end=pending[0].expiry;now=end;tick={now,98};OnTick();now=end+1;tick={now,999};OnTimer();assert(disk[ledgerName].back()[25]=="WIN");restart();assert(pending[0].final);return 0;}
+ if(test=="low-theory"){for(int i=0;i<5;i++)step(-1,100);breakout(false);datetime end=pending[0].expiry;now=end;tick={now,98};OnTick();now=end+1;tick={now,999};OnTimer();assert(disk[ledgerName].back()[25]=="WIN");restart();assert(pending[0].isSettled);return 0;}
  if(test=="low"){for(int i=0;i<5;i++)step(-1,100);breakout(false);assert(candidates()==1 && pending[0].direction=="LOW");return 0;}
  if(test=="four"){for(int i=0;i<4;i++)step();breakout();assert(candidates()==0);return 0;}
  if(test=="point-change"){for(int i=0;i<4;i++)step();step(100.001);breakout();assert(candidates()==0);return 0;}
@@ -99,10 +103,10 @@ int main(int argc,char** argv){
  if(test!="unknown-expiry"){
   now=expiry;tick={now,test=="loss"?100.:test=="draw"?101.:102.};if(test=="stale-timer")OnTimer();else OnTick();
  }
- now=expiry+1;tick={now,999};OnTimer();assert(pending[0].final);
+ now=expiry+1;tick={now,999};OnTimer();assert(pending[0].isSettled);
  auto& last=disk[ledgerName].back();assert(last[2]=="THEORY");
  string result=test=="unknown-expiry" || test=="late-entry" || test=="stale-timer"?"UNKNOWN":test=="loss"?"LOSS":test=="draw"?"DRAW":"WIN";
- assert(last[25]==result);restart();assert(pending[0].final && candidates()==1);
+ assert(last[25]==result);restart();assert(pending[0].isSettled && candidates()==1);
  if(test=="modes-15"){bool found=false;for(auto &row:disk[rawName])if(row[5]=="15"){assert(row[6]=="NOT_READ" && row[7]=="UNSUPPORTED_MT4_MODE");found=true;}assert(found);}
  if(test=="export"){
   assert(argc==3);for(auto& entry:disk){std::ofstream f(string(argv[2])+"/"+entry.first);for(auto& row:entry.second){for(size_t i=0;i<row.size();i++){if(i)f<<',';f<<row[i];}f<<'\n';}}
