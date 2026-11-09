@@ -29,6 +29,15 @@ void breakout(bool high=true,double dot=-1){
 }
 int main(int argc,char** argv){
  assert(argc>=2);string test=argv[1];assert(!BuffersConfirmed && RedDotMode==-1 && BlueDotMode==-1);BuffersConfirmed=true;RedDotMode=0;BlueDotMode=1;
+ if(test=="input-custom"){SignalPeriod=20;ArrowPeriod=4;SL_pips=75;AlertON=false;Email=false;}
+ if(test=="invalid-signal-period"){SignalPeriod=0;assert(OnInit()==INIT_PARAMETERS_INCORRECT && disk.empty());return 0;}
+ if(test=="invalid-arrow-period"){ArrowPeriod=0;assert(OnInit()==INIT_PARAMETERS_INCORRECT && disk.empty());return 0;}
+ if(test=="invalid-sl-pips"){SL_pips=-1;assert(OnInit()==INIT_PARAMETERS_INCORRECT && disk.empty());return 0;}
+ if(test=="diagnostic-target" || test=="diagnostic-unavailable" || test=="diagnostic-read-error" || test=="diagnostic-series-change"){
+  DiagnosticBarTime=1794217380;currentBar=DiagnosticBarTime+600;now=currentBar;tick={now,100};
+  advanceDuringIndicator=test=="diagnostic-series-change";missingDiagnostic=test=="diagnostic-unavailable";buffers[{3,10}]={test=="diagnostic-read-error"?EMPTY_VALUE:158.098,test=="diagnostic-read-error"?4802:0};
+ }
+ if(test=="diagnostic-forming")DiagnosticBarTime=currentBar;
  if(test=="unconfirmed")BuffersConfirmed=false;
  if(test=="modes-15")ProbeMaxMode=15;
  if(test=="invalid-mode"){RedDotMode=8;assert(OnInit()==INIT_PARAMETERS_INCORRECT && disk.empty());return 0;}
@@ -42,6 +51,32 @@ int main(int argc,char** argv){
   assert(OnInit()==0 && candidates()==1 && pending[0].isSettled && disk[names[0]]==saved);return 0;
  }
  assert(OnInit()==0);assert(sequence==1);
+ if(test=="diagnostic-forming"){assert(candidates()==0 && indicatorCalls.empty() && disk[rawName][1][6]=="NOT_READ" && disk[rawName][1][7]=="DIAGNOSTIC_BAR_UNAVAILABLE");return 0;}
+ if(test=="diagnostic-target" || test=="diagnostic-unavailable" || test=="diagnostic-read-error" || test=="diagnostic-series-change"){
+  assert(candidates()==0 && disk[rawName].size()==9);
+  for(int mode=0;mode<8;mode++){
+   auto &row=disk[rawName][mode+1];assert(row[4]==std::to_string(DiagnosticBarTime));
+   if(test=="diagnostic-unavailable"){assert(row[6]=="NOT_READ" && row[7]=="DIAGNOSTIC_BAR_UNAVAILABLE" && row[8]=="4066");}
+  }
+  if(test=="diagnostic-target")assert(disk[rawName][4][7]=="PRICE");
+  if(test=="diagnostic-read-error")assert(disk[rawName][4][6]=="EMPTY_VALUE" && disk[rawName][4][7]=="READ_ERROR" && disk[rawName][4][8]=="4802");
+  if(test=="diagnostic-series-change")assert(disk[rawName][1][7]=="SERIES_CHANGED_DURING_READ" && disk[rawName][2][6]=="NOT_READ");
+  assert(indicatorCalls.size()==(test=="diagnostic-unavailable"?0:test=="diagnostic-series-change"?1:8));return 0;
+ }
+ if(test=="input-defaults" || test=="input-custom"){
+  step();assert(indicatorCalls.size()==8);
+  for(auto call:indicatorCalls){assert(std::get<0>(call)==SignalPeriod && std::get<1>(call)==ArrowPeriod && std::get<2>(call)==SL_pips && std::get<3>(call)==AlertON && std::get<4>(call)==Email && std::get<6>(call)==1);}
+  string expected="SignalPeriod="+std::to_string(SignalPeriod)+";ArrowPeriod="+std::to_string(ArrowPeriod)+";SL_pips="+std::to_string(SL_pips)+";AlertON="+Flag(AlertON)+";Email="+Flag(Email);
+  assert(config.find(expected)!=string::npos && disk[ledgerName].back()[38]==config);
+  for(size_t i=1;i<disk[rawName].size();i++)assert(disk[rawName][i][9]==config && disk[rawName][i][10]=="ICUSTOM_EXPLICIT5_CHART_MATCH_UNVERIFIED");return 0;
+ }
+ if(test=="legacy-input-transition"){
+  for(int i=0;i<5;i++)step();breakout();OnDeinit(0);
+  for(auto &row:disk[ledgerName])if(row[0]=="1.00"){row[38]="indicator=buy-sell-magic1;inputs=DEFAULTS_UNCONFIRMED;confirmed=true;red=0;blue=1;min=5;ratio=10";row[39]="ICUSTOM_DEFAULTS_CLOSED_M1_NO_ORDERS";}
+  auto before=disk[ledgerName];assert(OnInit()==0 && pending.size()==1 && !pending[0].isSettled);
+  assert(disk[ledgerName].size()==before.size()+1 && disk[ledgerName].back()[2]=="CONFIG");
+  for(size_t i=0;i<before.size();i++)assert(disk[ledgerName][i]==before[i]);assert(red.count==0);return 0;
+ }
  if(test=="diagnostic-time"){assert(candidates()==0 && disk[rawName].size()==9);assert(disk[rawName][1][4]==std::to_string(DiagnosticBarTime));return 0;}
  if(test=="digits-five"){for(int i=0;i<5;i++)step(100.000001);assert(red.count==5);step(100.00001);assert(red.count==1);breakout();assert(candidates()==0);return 0;}
  if(test=="group-six"){for(int i=0;i<6;i++)step();breakout();assert(candidates()==1 && disk[ledgerName].back()[13]=="6");return 0;}
@@ -114,7 +149,7 @@ int main(int argc,char** argv){
  std::cout<<"passed "<<test<<"\n";
 }
 '''
-cases=['high','low','four','point-change','missing','normalize','wick','doji','read-error','invalid-values','duplicate','restart-group','restart-pending','restart-gap','gap','disconnect','timer-only','unconfirmed','config-change','modes-15','late-entry','unknown-expiry','loss','draw','corrupt','header-mismatch','writer-lock','ledger-write-failure','raw-write-failure','flush-failure','open-above','changed-break-dot','corrupt-consumed','low-theory','config-pending','invalid-mode','invalid-min','digits-five','low-wick','group-six','diagnostic-time','stale-timer']
+cases=['high','low','four','point-change','missing','normalize','wick','doji','read-error','invalid-values','duplicate','restart-group','restart-pending','restart-gap','gap','disconnect','timer-only','unconfirmed','config-change','modes-15','late-entry','unknown-expiry','loss','draw','corrupt','header-mismatch','writer-lock','ledger-write-failure','raw-write-failure','flush-failure','open-above','changed-break-dot','corrupt-consumed','low-theory','config-pending','invalid-mode','invalid-min','digits-five','low-wick','group-six','diagnostic-time','stale-timer','input-defaults','input-custom','invalid-signal-period','invalid-arrow-period','invalid-sl-pips','diagnostic-target','diagnostic-unavailable','diagnostic-read-error','legacy-input-transition','diagnostic-series-change','diagnostic-forming']
 with tempfile.TemporaryDirectory(prefix='bsm-tests-') as folder:
     p=Path(folder);(p/'tests.cpp').write_text(source+main)
     subprocess.run(['g++','-std=c++11','-Wall','-Wextra','-Werror','-Wno-misleading-indentation','-fsanitize=address,undefined','-g',str(p/'tests.cpp'),'-o',str(p/'tests')],check=True)

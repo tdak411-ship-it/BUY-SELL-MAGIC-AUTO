@@ -15,7 +15,7 @@ using string=std::string;using datetime=long long;using uint=unsigned int;
 const int INVALID_HANDLE=-1,PERIOD_M1=1,FILE_READ=1,FILE_WRITE=2,FILE_CSV=4,FILE_ANSI=8,FILE_SHARE_READ=16,CP_UTF8=65001,SEEK_END=2;
 const int INIT_SUCCEEDED=0,INIT_FAILED=-1,INIT_PARAMETERS_INCORRECT=2;
 const double EMPTY_VALUE=2147483647.;int Digits=3,lastError=0;
-datetime now=6000,currentBar=6000;bool connected=true;int failWrite=0;string failName="";
+datetime now=6000,currentBar=6000;bool missingDiagnostic=false,advanceDuringIndicator=false;bool connected=true;int failWrite=0;string failName="";
 std::vector<string> logs;
 struct MqlTick{datetime time;double bid;};MqlTick tick={6000,100};
 struct Candle{double o=99,h=101,l=98,c=100;};Candle candle;
@@ -39,9 +39,13 @@ void printParts(std::ostringstream&){}template<typename T,typename... A>void pri
 template<typename... A>void Print(A... a){std::ostringstream s;printParts(s,a...);logs.push_back(s.str());}
 bool IsConnected(){return connected;}bool SymbolInfoTick(string,MqlTick& result){result=tick;return true;}
 datetime iTime(string,int,int shift){return currentBar-shift*60;}
-int iBarShift(string,int,datetime time,bool){if(time>currentBar)return -1;return (currentBar-time)/60;}
+int iBarShift(string,int,datetime time,bool){if(missingDiagnostic){lastError=4066;return -1;}if(time>currentBar)return -1;return (currentBar-time)/60;}
 double iOpen(string,int,int){return candle.o;}double iHigh(string,int,int){return candle.h;}double iLow(string,int,int){return candle.l;}double iClose(string,int,int){return candle.c;}
-double iCustom(string,int,string,int mode,int shift){assert(mode>=0 && mode<=7 && shift>=1);auto it=buffers.find({mode,shift});if(it==buffers.end())return -1;lastError=it->second.second;return it->second.first;}
+std::vector<std::tuple<int,int,int,bool,bool,int,int>> indicatorCalls;
+
+double iCustom(string,int,string,int signalPeriod,int arrowPeriod,int stopPips,bool alertOn,bool email,int mode,int shift){
+ if(advanceDuringIndicator){currentBar+=60;advanceDuringIndicator=false;}
+ indicatorCalls.push_back({signalPeriod,arrowPeriod,stopPips,alertOn,email,mode,shift});assert(mode>=0 && mode<=7 && shift>=1);auto it=buffers.find({mode,shift});if(it==buffers.end())return -1;lastError=it->second.second;return it->second.first;}
 bool EventSetTimer(int){return true;}void EventKillTimer(){}
 int FileOpen(string name,int,char,int){for(auto& h:handles)if(h.second.open && h.second.name==name){lastError=5004;return -1;}if(!disk.count(name))disk[name]={};int id=++nextHandle;handles[id].name=name;return id;}
 void FileClose(int id){handles[id].open=false;}

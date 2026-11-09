@@ -1,8 +1,14 @@
 #property strict
-#property version "1.01"
+#property version "1.02"
 #property description "Independent Buy Sell Magic buffer probe and closed-M1 breakout evidence recorder. No orders."
 #include <BuySellMagicCore.mqh>
 input string IndicatorName="buy-sell-magic1";
+// User-supplied indicator input order: int, int, int, bool, bool.
+input int SignalPeriod=12;
+input int ArrowPeriod=2;
+input int SL_pips=100;
+input bool AlertON=true;
+input bool Email=true;
 input bool BuffersConfirmed=false;
 input int RedDotMode=-1;
 input int BlueDotMode=-1;
@@ -26,7 +32,7 @@ string Num(long v){return IntegerToString(v);}
 string Flag(bool b){return b?"true":"false";}
 void Stop(string reason){halted=true;Print("BSM_RECORDER_STOPPED ",reason,"; ledger=",ledgerName);}
 bool SafeName(string s){return s!="" && StringFind(s,"|")<0 && StringFind(s,",")<0 && StringFind(s,"\n")<0 && StringFind(s,"\r")<0 && StringFind(s,"\"")<0 && StringFind(s,"/")<0 && StringFind(s,"\\")<0 && StringFind(s,":")<0;}
-string Configuration(){return "indicator="+IndicatorName+";inputs=DEFAULTS_UNCONFIRMED;confirmed="+Flag(BuffersConfirmed)+";red="+Num(RedDotMode)+";blue="+Num(BlueDotMode)+";min="+Num(MinimumHorizontalDots)+";tolerance_points=0;ratio="+DoubleToString(DotPriceRatioLimit,16)+";probe_max="+Num(ProbeMaxMode);}
+string Configuration(){return "indicator="+IndicatorName+";inputs=EXPLICIT_FIVE_USER_SUPPLIED_ORDER;SignalPeriod="+Num(SignalPeriod)+";ArrowPeriod="+Num(ArrowPeriod)+";SL_pips="+Num(SL_pips)+";AlertON="+Flag(AlertON)+";Email="+Flag(Email)+";input_types=int:int:int:bool:bool;confirmed="+Flag(BuffersConfirmed)+";red="+Num(RedDotMode)+";blue="+Num(BlueDotMode)+";min="+Num(MinimumHorizontalDots)+";tolerance_points=0;ratio="+DoubleToString(DotPriceRatioLimit,16)+";probe_max="+Num(ProbeMaxMode);}
 bool Flush(int h){ResetLastError();FileFlush(h);return GetLastError()==0;}
 bool ReadCells(int h,string &f[],int n){
  ArrayResize(f,n);for(int i=0;i<n;i++){if(FileIsEnding(h))return false;f[i]=FileReadString(h);if(i<n-1 && FileIsLineEnding(h))return false;}
@@ -49,7 +55,7 @@ bool AddPending(string &f[]){
  pending[n].key=f[3];pending[n].direction=f[9];pending[n].bar=(datetime)StringToInteger(f[7]);pending[n].entry=(datetime)StringToInteger(f[21]);pending[n].expiry=(datetime)StringToInteger(f[23]);pending[n].entryBid=f[22];pending[n].isSettled=false;return true;
 }
 bool Restore(string &f[]){
- if(f[0]!=VERSION || f[1]!=Num(sequence+1) || f[5]!=Symbol() || f[6]!="M1" || f[49]!="COMMIT" || f[39]!="ICUSTOM_DEFAULTS_CLOSED_M1_NO_ORDERS" || f[48]!=Num(Digits))return false;
+ if(f[0]!=VERSION || f[1]!=Num(sequence+1) || f[5]!=Symbol() || f[6]!="M1" || f[49]!="COMMIT" || (f[39]!="ICUSTOM_DEFAULTS_CLOSED_M1_NO_ORDERS" && f[39]!="ICUSTOM_EXPLICIT5_CLOSED_M1_NO_ORDERS") || f[48]!=Num(Digits))return false;
  datetime bar=(datetime)StringToInteger(f[7]);if(bar<=0 || bar%60!=0 || f[7]!=Num((long)bar) || (f[19]!="true" && f[19]!="false"))return false;
  if(f[2]=="BAR" || f[2]=="RESET" || f[2]=="CONFIG"){
   if((f[2]=="CONFIG" ? (bar!=cursor || f[38]==restoredConfig) : bar<=cursor) || f[37]!=f[7] || f[3]!=Symbol()+"|M1|"+f[7])return false;
@@ -111,22 +117,46 @@ bool OpenFiles(){
  }
  return FileSeek(rawFile,0,SEEK_END);
 }
+bool WriteRawSample(datetime bar,int mode,string value,string status,int error){
+ ResetLastError();uint count=FileWrite(rawFile,VERSION,(long)TimeCurrent(),Symbol(),"M1",(long)bar,mode,value,status,error,config,"ICUSTOM_EXPLICIT5_CHART_MATCH_UNVERIFIED","COMMIT");int writeError=GetLastError();
+ if(count==0 || writeError!=0 || !Flush(rawFile)){Stop("RAW_WRITE_OR_FLUSH_FAILED");return false;}return true;
+}
 bool Probe(datetime bar,int shift,double reference,double &redValue,string &redStatus,double &blueValue,string &blueStatus){
  redValue=0;blueValue=0;redStatus="UNCONFIGURED";blueStatus="UNCONFIGURED";int firstError=0,firstMode=-1;
+ datetime anchor=iTime(Symbol(),PERIOD_M1,0);
  for(int mode=0;mode<=ProbeMaxMode;mode++){
-  double value=0;int error=0;string status="UNSUPPORTED_MT4_MODE";
-  if(mode<=7){ResetLastError();value=iCustom(Symbol(),PERIOD_M1,IndicatorName,mode,shift);error=GetLastError();status=DotStatus(value,error,reference,DotPriceRatioLimit);if(status=="PRICE" && !Positive(NormalizeDouble(value,Digits)))status="INVALID_NORMALIZED_PRICE";}
+  double value=0;int error=0;string status="UNSUPPORTED_MT4_MODE",raw="NOT_READ";
+  if(mode<=7){
+   if(shift<1 || iTime(Symbol(),PERIOD_M1,shift)!=bar)status="DIAGNOSTIC_BAR_UNAVAILABLE";
+   else{
+    ResetLastError();value=iCustom(Symbol(),PERIOD_M1,IndicatorName,SignalPeriod,ArrowPeriod,SL_pips,AlertON,Email,mode,shift);error=GetLastError();raw=RawValue(value);
+    status=DotStatus(value,error,reference,DotPriceRatioLimit);
+    if(status=="PRICE" && !Positive(NormalizeDouble(value,Digits)))status="INVALID_NORMALIZED_PRICE";
+    if(iTime(Symbol(),PERIOD_M1,0)!=anchor || iTime(Symbol(),PERIOD_M1,shift)!=bar)status="SERIES_CHANGED_DURING_READ";
+   }
+  }
   if(error!=0 && firstMode<0){firstMode=mode;firstError=error;}
   if(mode==RedDotMode){redValue=value;redStatus=status;}if(mode==BlueDotMode){blueValue=value;blueStatus=status;}
-  ResetLastError();uint count=FileWrite(rawFile,VERSION,(long)TimeCurrent(),Symbol(),"M1",(long)bar,mode,mode<=7?RawValue(value):"NOT_READ",status,error,config,"ICUSTOM_DEFAULT_INPUTS_CHART_MATCH_UNVERIFIED","COMMIT");int writeError=GetLastError();
-  if(count==0 || writeError!=0 || !Flush(rawFile)){Stop("RAW_WRITE_OR_FLUSH_FAILED");return false;}
+  if(!WriteRawSample(bar,mode,raw,status,error))return false;
  }
  if(firstMode>=0)Print("BSM_INDICATOR_READ_ERROR; bar=",(long)bar,"; mode=",firstMode,"; error=",firstError);
  return true;
 }
+void RunDiagnostic(){
+ ResetLastError();int shift=iBarShift(Symbol(),PERIOD_M1,DiagnosticBarTime,true);int lookupError=GetLastError();
+ ResetLastError();datetime actual=shift>=1 ? iTime(Symbol(),PERIOD_M1,shift) : 0;int timeError=GetLastError();
+ ResetLastError();double reference=shift>=1 ? iClose(Symbol(),PERIOD_M1,shift) : 0;int priceError=GetLastError();
+ Print("BSM_DIAGNOSTIC requested=",(long)DiagnosticBarTime,"; actual=",(long)actual,"; shift=",shift,"; lookup_error=",lookupError,"; time_error=",timeError,"; price_error=",priceError,"; inputs=",config);
+ if(lookupError!=0 || timeError!=0 || priceError!=0 || shift<1 || actual!=DiagnosticBarTime || !Positive(reference)){
+  int error=lookupError!=0 ? lookupError : (timeError!=0 ? timeError : priceError);
+  for(int mode=0;mode<=ProbeMaxMode;mode++)if(!WriteRawSample(DiagnosticBarTime,mode,"NOT_READ",mode<=7 ? "DIAGNOSTIC_BAR_UNAVAILABLE" : "UNSUPPORTED_MT4_MODE",error))return;
+  Print("BSM_DIAGNOSTIC_BAR_UNAVAILABLE; requested=",(long)DiagnosticBarTime);return;
+ }
+ double r,b;string rs,bs;Probe(DiagnosticBarTime,shift,reference,r,rs,b,bs);
+}
 void BaseRow(string &f[],string event,datetime bar){
  ArrayResize(f,COLS);for(int i=0;i<COLS;i++)f[i]="";
- f[0]=VERSION;f[1]=Num(sequence+1);f[2]=event;f[3]=Symbol()+"|M1|"+Num((long)bar);f[4]=Num((long)TimeCurrent());f[5]=Symbol();f[6]="M1";f[7]=Num((long)bar);f[8]=Num((long)TimeCurrent());f[9]="NONE";f[19]="false";f[21]="0";f[23]="0";f[25]="UNKNOWN";f[26]="NOT_READ";f[37]=Num((long)bar);f[38]=config;f[39]="ICUSTOM_DEFAULTS_CLOSED_M1_NO_ORDERS";f[40]="0";f[41]="0";f[42]="0";f[43]="NOT_A_CANDIDATE";f[48]=Num(Digits);f[49]="COMMIT";
+ f[0]=VERSION;f[1]=Num(sequence+1);f[2]=event;f[3]=Symbol()+"|M1|"+Num((long)bar);f[4]=Num((long)TimeCurrent());f[5]=Symbol();f[6]="M1";f[7]=Num((long)bar);f[8]=Num((long)TimeCurrent());f[9]="NONE";f[19]="false";f[21]="0";f[23]="0";f[25]="UNKNOWN";f[26]="NOT_READ";f[37]=Num((long)bar);f[38]=config;f[39]="ICUSTOM_EXPLICIT5_CLOSED_M1_NO_ORDERS";f[40]="0";f[41]="0";f[42]="0";f[43]="NOT_A_CANDIDATE";f[48]=Num(Digits);f[49]="COMMIT";
  GroupCells(red,f,27);GroupCells(blue,f,32);
 }
 void CacheQuote(){
@@ -182,7 +212,7 @@ void OnDeinit(const int reason){Print("BSM_DEINIT reason=",reason);if(ledger!=IN
 int OnInit(){
  halted=false;busy=false;sequence=0;cursor=0;seenOpen=0;ClearGroup(red);ClearGroup(blue);ArrayResize(pending,0);
  for(int i=0;i<600;i++){quoteTimes[i]=0;quoteBids[i]=0;}
- if(Period()!=PERIOD_M1 || !SafeName(Symbol()) || !SafeName(IndicatorName) || ProbeMaxMode<0 || ProbeMaxMode>15 || MinimumHorizontalDots<5 || MinimumHorizontalDots>10000 || !MathIsValidNumber(DotPriceRatioLimit) || DotPriceRatioLimit<1 || DotPriceRatioLimit>1000 ||
+ if(SignalPeriod<1 || SignalPeriod>10000 || ArrowPeriod<1 || ArrowPeriod>10000 || SL_pips<0 || SL_pips>1000000 || Period()!=PERIOD_M1 || !SafeName(Symbol()) || !SafeName(IndicatorName) || ProbeMaxMode<0 || ProbeMaxMode>15 || MinimumHorizontalDots<5 || MinimumHorizontalDots>10000 || !MathIsValidNumber(DotPriceRatioLimit) || DotPriceRatioLimit<1 || DotPriceRatioLimit>1000 ||
     RedDotMode < -1 || RedDotMode>7 || BlueDotMode < -1 || BlueDotMode>7 || (BuffersConfirmed && (RedDotMode<0 || BlueDotMode<0 || RedDotMode==BlueDotMode || RedDotMode>ProbeMaxMode || BlueDotMode>ProbeMaxMode)))return INIT_PARAMETERS_INCORRECT;
  config=Configuration();restoredConfig="";if(!OpenFiles()){Stop("INVALID_PARTIAL_OR_LOCKED_FILE_NO_REWRITE");OnDeinit(0);return INIT_FAILED;}
  datetime reference=iTime(Symbol(),PERIOD_M1,0),bar=iTime(Symbol(),PERIOD_M1,1);
@@ -190,9 +220,8 @@ int OnInit(){
  if(cursor<bar)ResetAt(bar,cursor==0?"STARTUP_NO_HISTORICAL_CANDIDATES":"RESTART_GAP_NO_BACKFILL");
  if(restoredConfig!="" && restoredConfig!=config)ResetAt(bar,"CONFIG_CHANGED_GROUPS_RESET","CONFIG");
  seenOpen=reference;if(halted || !EventSetTimer(1)){OnDeinit(0);return INIT_FAILED;}
- if(DiagnosticBarTime>0){int shift=iBarShift(Symbol(),PERIOD_M1,DiagnosticBarTime,true);double r,b;string rs,bs;
-  if(shift>=1 && iTime(Symbol(),PERIOD_M1,shift)==DiagnosticBarTime)Probe(DiagnosticBarTime,shift,iClose(Symbol(),PERIOD_M1,shift),r,rs,b,bs);else Print("BSM_DIAGNOSTIC_BAR_UNAVAILABLE");}
- Print("BSM build=1.01; recorder=",VERSION,"; confirmed=",BuffersConfirmed,"; no orders; review indicator runtime logs");return halted?INIT_FAILED:INIT_SUCCEEDED;
+ if(DiagnosticBarTime>0)RunDiagnostic();
+ Print("BSM build=1.02; recorder=",VERSION,"; confirmed=",BuffersConfirmed,"; no orders; review indicator runtime logs");return halted?INIT_FAILED:INIT_SUCCEEDED;
 }
 void OnTick(){Poll(true);}
 void OnTimer(){Poll(false);}

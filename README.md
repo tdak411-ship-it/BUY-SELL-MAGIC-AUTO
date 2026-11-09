@@ -4,9 +4,13 @@ MT4用 `buy-sell-magic1.ex4` の**独立した記録専用EA**です。M1確定�
 
 **初期状態はバッファ調査専用**です。赤・青のmodeは未確定のため、`BuffersConfirmed=false`、両mode=-1で起動します。実測で確認するまで候補を作りません。EX4は本納品に含みません。
 
+## v1.02のインジケーター入力
+
+SignalPeriod=12、ArrowPeriod=2、SL_pips=100、AlertON=true、Email=trueをEAのinputとして追加し、iCustomへこの順で明示渡しします。記録した設定と2026.11.09 09:43の158.098を照合する方法は [docs/INDICATOR_INPUTS.md](docs/INDICATOR_INPUTS.md) を参照してください。
+
 ## v1.01のコンパイル識別子修正
 
-MQL4の予約語`final`と衝突するEA側の結果確定フラグを`isSettled`へ変更しました。水平判定・ブレイク・180秒判定・CSV仕様は変更していません。CSVのrecorder_versionは互換性維持のため1.00のまま、EAビルドは1.01です。詳細は [docs/COMPILE_FIX.md](docs/COMPILE_FIX.md) を参照してください。
+MQL4の予約語`final`と衝突するEA側の結果確定フラグを`isSettled`へ変更しました。水平判定・ブレイク・180秒判定・CSV仕様は変更していません。CSVのrecorder_versionは互換性維持のため1.00のまま、この識別子修正はv1.02にも維持されています。詳細は [docs/COMPILE_FIX.md](docs/COMPILE_FIX.md) を参照してください。
 
 ## ファイル
 
@@ -25,11 +29,11 @@ MQL4の予約語`final`と衝突するEA側の結果確定フラグを`isSettled
 2. 正規の `buy-sell-magic1.ex4` を **MQL4/Indicators/** に置きます。EX4は改変しません。
 3. 本体mq4を **MQL4/Experts/**、共通mqhを **MQL4/Include/** へ置きます。MetaEditorで **BuySellMagicRecorder.mq4** を開きコンパイルします。mqh単体をコンパイルしません。実際のerrors/warningsを確認してください。本環境ではMetaEditorコンパイル未実施です。
 4. **既存EAを載せていない新しいUSDJPY・M1チャートを1枚**開き、このEAを置きます。M3-SIGNAL等が稼働するチャートのEAを置き換えないでください。最初はバッファ設定を初期値のままにします。自動売買OFFでもティック/タイマーの記録を行う設計です。
-5. Expertsの `BSM build=1.01; recorder=1.00; confirmed=false` と、MQL4/FilesにできるBSM専用CSVを確認します。EAを複数チャートから同じ銘柄の台帳へ同時起動しないでください。
+5. Expertsの `BSM build=1.02; recorder=1.00; confirmed=false` と、MQL4/FilesにできるBSM専用CSVを確認します。EAを複数チャートから同じ銘柄の台帳へ同時起動しないでください。
 
 ## バッファの実測確認
 
-`iCustom(Symbol(),PERIOD_M1,IndicatorName,mode,shift)` で**インジケーターのデフォルト入力**を使用します。extern/inputの型や宣言順は推測して渡しません。チャートの入力と同じとは保証できません。チャート設定を保存した.set、パラメーター画面、提供元の入力仕様と照合してください。
+`iCustom(Symbol(),PERIOD_M1,IndicatorName,SignalPeriod,ArrowPeriod,SL_pips,AlertON,Email,mode,shift)` で利用者提示の5入力を明示渡しします。3整数・2boolとして渡し、順序は提示順です。EX4の実際のextern/input宣言を読み取ったわけではないため、チャート設定を保存した.set、パラメーター画面、提供元の入力仕様と照合してください。
 
 標準ではmode 0～7を、毎回の新しいM1確定足で読みます。MQL4で文書化されたiCustom modeは0～7です。ProbeMaxModeを8～15にした場合は、その範囲を `UNSUPPORTED_MT4_MODE` / NOT_READとして記録し、非対応のネイティブ呼出しは行いません。8以上が必要な指標なら、ソース/提供元仕様やオブジェクト描画の有無を別途確認する必要があります。
 
@@ -44,6 +48,11 @@ MQL4の予約語`final`と衝突するEA側の結果確定フラグを`isSettled
 | 入力 | 初期値 | 意味 |
 | --- | --- | --- |
 | IndicatorName | buy-sell-magic1 | Indicators直下のファイル名。拡張子なし |
+| SignalPeriod | 12 | int、1～10000 |
+| ArrowPeriod | 2 | int、1～10000 |
+| SL_pips | 100 | int、0～1000000 |
+| AlertON | true | bool、インジケーターへ渡す |
+| Email | true | bool、インジケーターへ渡す |
 | BuffersConfirmed | false | 利用者が実測照合した後だけtrue。EA自身が検証済みと主張するフラグではありません |
 | RedDotMode | -1 | 赤ドット、0～7。-1は未設定 |
 | BlueDotMode | -1 | 青ドット、0～7。-1は未設定 |
@@ -106,7 +115,7 @@ python3 analysis/export_signals.py \
 
 ## 未解決・未検証
 
-- 正規EX4とMT4実機が未提供のため、赤/青のmode、必要な入力設定、チャートとの一致、再計算/リペイント・バッファ保持特性は未確認です。自動検出や内部ロジックの推測はしません。
+- 正規EX4とMT4実機が未提供のため、赤/青のmode、提供された5項目以外の入力有無・実際の宣言順/型、チャートとの一致、再計算/リペイント・バッファ保持特性は未確認です。自動検出や内部ロジックの推測はしません。
 - MetaEditorコンパイル・MT4での新足最初のティック・OS/端末再起動・秒単位の実価格取得は実機未検証です。ホストテストをコンパイル成功と表現しません。
 - 長期台帳は起動時に全行検査するため、実機でのサイズ/速度評価が必要です。自動削除・ローテーションは実装しません。
 - GitHub：[tdak411-ship-it/BUY-SELL-MAGIC-AUTO](https://github.com/tdak411-ship-it/BUY-SELL-MAGIC-AUTO)。独立リポジトリとして管理し、EX4・実機CSV・設定ファイルは追跡対象外です。
